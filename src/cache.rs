@@ -90,9 +90,9 @@ impl<'a> Iterator for SegmentIter<'a> {
 
 #[derive(Clone)]
 pub struct EntryMetaUnpacked {
-    pub(crate) referenced: bool,
-    pub(crate) held: bool,
-    pub(crate) occupied: bool,
+    pub referenced: bool,
+    pub held: bool,
+    pub occupied: bool,
 }
 
 impl EntryMetaUnpacked {
@@ -122,7 +122,7 @@ impl From<EntryMetaUnpacked> for u8 {
 }
 
 pub struct EntryMeta {
-    pub(crate) meta: AtomicU8, // ref: 1 bit, reserved: 1 bit
+    meta: AtomicU8, // ref: 1 bit, reserved: 1 bit
 }
 
 impl EntryMeta {
@@ -130,6 +130,14 @@ impl EntryMeta {
         unsafe {
             (self as *const EntryMeta as *mut u8).add(std::mem::size_of::<EntryMeta>()) as *mut u8
         }
+    }
+
+    pub fn load_meta(&self, order: Ordering) -> EntryMetaUnpacked {
+        self.meta.load(order).into()
+    }
+
+    pub fn set_meta(&self, value: EntryMetaUnpacked, order: Ordering) {
+        self.meta.store(value.into(), order);
     }
 
     /// Returns the next entry within the segment.
@@ -340,7 +348,7 @@ impl ClockCache {
     /// The caller need to check the reserved bit, if not set, this entry need to be evicted to the storage
     ///
     /// Unless the reserved bit is set (the entry is empty), it is the caller's responsibility to serialize the concurrent read/write.
-    pub fn probe_entry(&self) -> Option<*mut EntryMeta> {
+    pub fn probe_entry(&self) -> Option<&EntryMeta> {
         let mut seg_lock = None;
         for _p in 0..self.probe_len {
             let (cur_entry, cur_lock) = self.next_entry(seg_lock);
@@ -374,7 +382,7 @@ impl ClockCache {
             };
 
             if let Some(entry) = entry {
-                return Some(entry);
+                return Some(unsafe { &*entry });
             }
         }
 
@@ -444,16 +452,14 @@ mod test {
             let mut entry_meta = assert_empty_entry(entry);
 
             let test_entry = TestEntry::init(i as u16);
-            let cached_ptr = unsafe { &*entry }.data_ptr() as *mut TestEntry;
+            let cached_ptr = entry.data_ptr() as *mut TestEntry;
             unsafe { cached_ptr.write(test_entry) };
             allocated.push(cached_ptr);
 
             entry_meta.held = false;
             entry_meta.referenced = true;
             entry_meta.occupied = true;
-            unsafe { &*entry }
-                .meta
-                .store(entry_meta.into(), Ordering::Relaxed);
+            entry.set_meta(entry_meta, Ordering::Relaxed);
         }
 
         for ptr in allocated.iter() {
@@ -472,21 +478,20 @@ mod test {
 
         for _i in 0..cache_capacity {
             let entry = cache.probe_entry().unwrap();
-            let entry_meta =
-                EntryMetaUnpacked::from(unsafe { &*entry }.meta.load(Ordering::Relaxed));
+            let entry_meta = entry.load_meta(Ordering::Relaxed);
             assert_eq!(entry_meta.referenced, false);
             assert_eq!(entry_meta.held, false);
             assert_eq!(entry_meta.occupied, true);
 
-            let cached_ptr = unsafe { &*entry }.data_ptr() as *mut TestEntry;
+            let cached_ptr = entry.data_ptr() as *mut TestEntry;
             unsafe { &*cached_ptr }.sanity_check();
         }
 
         std::mem::drop(cache);
     }
 
-    fn assert_empty_entry(entry: *mut EntryMeta) -> EntryMetaUnpacked {
-        let entry_meta = EntryMetaUnpacked::from(unsafe { &*entry }.meta.load(Ordering::Relaxed));
+    fn assert_empty_entry(entry: &EntryMeta) -> EntryMetaUnpacked {
+        let entry_meta = entry.load_meta(Ordering::Relaxed);
         assert_eq!(entry_meta.held, true);
         assert_eq!(entry_meta.referenced, false);
         assert_eq!(entry_meta.occupied, false);
@@ -510,14 +515,12 @@ mod test {
             let mut entry_meta = assert_empty_entry(entry);
 
             let test_entry = TestEntry::init(i as u16);
-            let cached_ptr = unsafe { &*entry }.data_ptr() as *mut TestEntry;
+            let cached_ptr = entry.data_ptr() as *mut TestEntry;
             unsafe { cached_ptr.write(test_entry) };
             allocated.push(cached_ptr);
 
             entry_meta.set_occupied();
-            unsafe { &*entry }
-                .meta
-                .store(entry_meta.into(), Ordering::Relaxed);
+            entry.set_meta(entry_meta, Ordering::Relaxed);
         }
 
         // move the cursor to next segment
@@ -533,14 +536,12 @@ mod test {
             let mut entry_meta = assert_empty_entry(entry);
 
             let test_entry = TestEntry::init((i + entry_per_seg) as u16);
-            let cached_ptr = unsafe { &*entry }.data_ptr() as *mut TestEntry;
+            let cached_ptr = entry.data_ptr() as *mut TestEntry;
             unsafe { cached_ptr.write(test_entry) };
             allocated.push(cached_ptr);
 
             entry_meta.set_occupied();
-            unsafe { &*entry }
-                .meta
-                .store(entry_meta.into(), Ordering::Relaxed);
+            entry.set_meta(entry_meta, Ordering::Relaxed);
         }
 
         for ptr in allocated.iter() {
@@ -550,16 +551,11 @@ mod test {
         {
             let mut evicted = 0;
             let seg_iter = cache.remove_segment().unwrap();
-            let segment = seg_iter.segment;
             for _entry in seg_iter {
                 evicted += 1;
             }
 
             assert_eq!(evicted, entry_per_seg);
-
-            unsafe {
-                Segment::dealloc(segment as *mut u8);
-            }
         }
         assert!(cache.remove_segment().is_none());
         std::mem::drop(cache);
@@ -569,19 +565,18 @@ mod test {
         let entry = cache.probe_entry();
         match entry {
             Some(e) => {
-                let meta = unsafe { &*e }.meta.load(Ordering::Relaxed);
-                let meta = EntryMetaUnpacked::from(meta);
+                let meta = e.load_meta(Ordering::Relaxed);
                 if meta.referenced {
                     // means the entry is ready to write
                     let val = TestEntry::init(i as u16);
-                    let ptr = unsafe { &*e }.data_ptr() as *mut TestEntry;
+                    let ptr = e.data_ptr() as *mut TestEntry;
                     unsafe {
                         ptr.write(val);
                     }
-                    unsafe { &*e }.meta.store(meta.into(), Ordering::Release);
+                    e.set_meta(meta, Ordering::Relaxed);
                 } else {
                     // the entry was occupied, we check its sanity
-                    let ptr = unsafe { &*e }.data_ptr() as *const TestEntry;
+                    let ptr = e.data_ptr() as *const TestEntry;
                     unsafe { &*ptr }.sanity_check();
                 }
             }
