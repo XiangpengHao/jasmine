@@ -97,8 +97,6 @@ pub struct EntryMetaUnpacked {
 
 impl EntryMetaUnpacked {
     pub fn set_occupied(&mut self) {
-        assert_eq!(self.occupied, false);
-        assert_eq!(self.held, true);
         self.held = false;
         self.occupied = true;
         self.referenced = true;
