@@ -36,8 +36,7 @@ impl Segment {
 
     fn alloc() -> *mut u8 {
         let seg_layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
-        let ptr = unsafe { std::alloc::alloc_zeroed(seg_layout) };
-        ptr
+        unsafe { std::alloc::alloc_zeroed(seg_layout) }
     }
 
     unsafe fn dealloc(ptr: *mut u8) {
@@ -174,6 +173,10 @@ pub struct ClockCache {
 impl Drop for ClockCache {
     fn drop(&mut self) {
         let mut cur = self.segments.load(Ordering::Relaxed);
+        if cur.is_null() {
+            return;
+        }
+
         let start = cur;
         loop {
             let next = unsafe { &*cur }.next.load(Ordering::Relaxed);
@@ -227,40 +230,49 @@ impl ClockCache {
         }
     }
 
-    // only one thread at any time should call this function
-    pub fn add_segment(&self, ptr: *mut u8) {
+    /// only one thread at any time should call this function
+    ///
+    /// # Safety
+    /// The ptr must be valid and at least `SEGMENT_SIZE` (default 4096) bytes long.
+    ///
+    /// The only safe and stable way to get a ptr is to call `Segment::alloc()`.
+    pub unsafe fn add_segment(&self, ptr: *mut u8) {
         let cur = self.segments.load(Ordering::Relaxed);
-        let cur_next = unsafe { &*cur }.next.load(Ordering::Relaxed);
+        let cur_next = { &*cur }.next.load(Ordering::Relaxed);
 
-        unsafe {
+        {
             std::ptr::write_bytes(ptr, 0, SEGMENT_SIZE);
         }
         let ptr = ptr as *mut Segment;
 
-        let new_segment = unsafe { &*ptr };
+        let new_segment = { &*ptr };
         new_segment.next.store(cur_next, Ordering::Relaxed);
-        unsafe { &*cur }.next.store(ptr, Ordering::Relaxed);
+        { &*cur }.next.store(ptr, Ordering::Relaxed);
         self.segments.store(ptr, Ordering::Release);
     }
 
     /// The caller need to iterate all the entries in the segment and evict them
     /// As long as the lock guard is held, not other thread can promote entry to this segment
     ///
-    /// Returns None if the segment is the last one in the cache
+    /// Returns None when all segments in the cache are removed
     pub fn remove_segment(&self) -> Option<SegmentIter<'static>> {
         // step 1: loop over all segments to find one that we can acquire write lock
         let backoff = Backoff::new();
         let mut prev = self.segments.load(Ordering::Relaxed);
+        if prev.is_null() {
+            return None;
+        }
+
         let mut cur = unsafe { &*prev }.next.load(Ordering::Relaxed);
         let lock_guard = loop {
+            if cur.is_null() {
+                // All segments are removed
+                return None;
+            }
             match unsafe { &*cur }.migration_lock.try_write() {
                 Some(v) => break v,
                 None => {
                     let next = unsafe { (*cur).next.load(Ordering::Relaxed) };
-                    if next == cur {
-                        // meaning we are the last segment
-                        return None;
-                    }
                     prev = cur;
                     cur = next;
                     backoff.spin();
@@ -269,34 +281,50 @@ impl ClockCache {
         };
 
         let next = unsafe { (*cur).next.load(Ordering::Relaxed) };
-        if next == cur {
-            return None;
-        }
 
         // step 2: make sure the probe_loc is not pointing to the selected segment
         let prob_loc = self.probe_loc.load(Ordering::Acquire);
         let prob_seg = Segment::from_entry(prob_loc);
         if prob_seg == cur {
-            // the prob_loc is in the current segment, we need to update to next segment
-            self.probe_loc
-                .store(unsafe { &*next }.first_entry(), Ordering::Release);
+            if next == cur {
+                // we are the last one, no thread will probe_entry on us
+                // this means that when the cache is empty, no one should call probe_entry, otherwise a segment fault will happen
+                self.probe_loc
+                    .store(std::ptr::null_mut(), Ordering::Release);
+            } else {
+                // the prob_loc is in the current segment, we need to update to next segment
+                self.probe_loc
+                    .store(unsafe { &*next }.first_entry(), Ordering::Release);
+            }
         }
 
         unsafe { &*prev }.next.store(next, Ordering::Relaxed);
-        self.segments.store(next, Ordering::Relaxed);
+
+        if next == cur {
+            // this is the last segment, we are done
+            self.segments.store(std::ptr::null_mut(), Ordering::Relaxed);
+        } else {
+            self.segments.store(next, Ordering::Relaxed);
+        }
 
         Some(SegmentIter::new(cur, self.entry_size, lock_guard))
     }
 
     /// Optional current segment lock, this is just a performance optimization
     /// Returns the old entry as well as its segment lock
+    ///
+    /// Returns None if the cache is empty (due to `remove_segment`)
     fn next_entry<'a>(
         &'a self,
         mut seg_lock: Option<RwLockReadGuard<'a, ()>>,
-    ) -> (*mut EntryMeta, RwLockReadGuard<()>) {
+    ) -> Option<(*mut EntryMeta, RwLockReadGuard<()>)> {
         let mut cur_entry = self.probe_loc.load(Ordering::Relaxed);
+
         let backoff = Backoff::new();
         loop {
+            if cur_entry.is_null() {
+                return None;
+            }
             let (entry, lock) = match unsafe { &*cur_entry }.next_entry(self.entry_size) {
                 Some(v) => {
                     let seg_lock = match seg_lock {
@@ -336,7 +364,7 @@ impl ClockCache {
                 Ordering::Relaxed,
             ) {
                 Ok(old) => {
-                    return (old, lock);
+                    return Some((old, lock));
                 }
                 Err(old) => {
                     seg_lock = Some(lock);
@@ -353,10 +381,14 @@ impl ClockCache {
     /// The caller need to check the reserved bit, if not set, this entry need to be evicted to the storage
     ///
     /// Unless the reserved bit is set (the entry is empty), it is the caller's responsibility to serialize the concurrent read/write.
+    ///
+    /// There are two cases this function may return None:
+    /// 1. The cache is empty (due to `remove_segment`)
+    /// 2. The all the entries are referenced within the probe_len (default to 16)
     pub fn probe_entry(&self) -> Option<&EntryMeta> {
         let mut seg_lock = None;
         for _p in 0..self.probe_len {
-            let (cur_entry, cur_lock) = self.next_entry(seg_lock);
+            let (cur_entry, cur_lock) = self.next_entry(seg_lock)?;
             seg_lock = Some(cur_lock);
 
             let entry = match unsafe { &*cur_entry }.meta.compare_exchange_weak(
@@ -534,7 +566,7 @@ mod test {
             assert!(entry.is_none());
         }
 
-        cache.add_segment(Segment::alloc());
+        unsafe { cache.add_segment(Segment::alloc()) };
 
         for i in 1..=entry_per_seg {
             let entry = cache.probe_entry().unwrap();
@@ -553,16 +585,23 @@ mod test {
             unsafe { &**ptr }.sanity_check();
         }
 
-        {
+        loop {
             let mut evicted = 0;
-            let seg_iter = cache.remove_segment().unwrap();
+            let seg_iter = match cache.remove_segment() {
+                Some(seg_iter) => seg_iter,
+                None => break,
+            };
             for _entry in seg_iter {
                 evicted += 1;
             }
 
             assert_eq!(evicted, entry_per_seg);
         }
-        assert!(cache.remove_segment().is_none());
+
+        for _i in 0..10 {
+            let entry = cache.probe_entry();
+            assert!(entry.is_none());
+        }
         std::mem::drop(cache);
     }
 
@@ -615,20 +654,30 @@ mod test {
         let cache = cache.clone();
         thread_handlers.push(thread::spawn(move || {
             let mut pin = crossbeam::epoch::pin();
-            cache.add_segment(Segment::alloc());
+            unsafe { cache.add_segment(Segment::alloc()) };
 
             for i in 1..=entry_per_seg {
                 pin.repin();
                 thread_probe_entry(&cache, i);
             }
 
-            let seg_iter = cache.remove_segment().unwrap();
+            loop {
+                let seg_iter = match cache.remove_segment() {
+                    Some(seg_iter) => seg_iter,
+                    None => break,
+                };
 
-            pin.repin();
+                for i in 1..=entry_per_seg {
+                    pin.repin();
+                    thread_probe_entry(&cache, i);
+                }
 
-            pin.defer(move || {
-                std::mem::drop(seg_iter);
-            });
+                pin.repin();
+
+                pin.defer(move || {
+                    std::mem::drop(seg_iter);
+                });
+            }
         }));
 
         for h in thread_handlers {
