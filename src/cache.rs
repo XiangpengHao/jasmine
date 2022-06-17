@@ -138,6 +138,13 @@ impl EntryMeta {
         self.meta.store(value.into(), order);
     }
 
+    /// This is the shortcut of loading the meta, set it to referenced, and then store it back.
+    pub fn set_referenced(&self) {
+        let mut meta = self.load_meta(Ordering::Relaxed);
+        meta.referenced = true;
+        self.set_meta(meta, Ordering::Relaxed);
+    }
+
     /// Returns the next entry within the segment.
     /// Returns `None` if the entry is the last one.
     fn next_entry(&self, cache_entry_size: usize) -> Option<*mut EntryMeta> {
