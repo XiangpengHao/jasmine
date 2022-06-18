@@ -8,7 +8,9 @@ use crate::backoff::Backoff;
 use spin::{rwlock::RwLockWriteGuard, RwLockReadGuard};
 use std::mem::ManuallyDrop;
 
-const SEGMENT_SIZE: usize = 4 * 1024; // 4KB
+/// Jasmine manages memory at the granularity of segments.
+pub const SEGMENT_SIZE: usize = 4 * 1024; // 4KB
+
 const SEGMENT_ALIGN: usize = 0x0fff;
 
 /// The unit of cache allocation
@@ -192,9 +194,9 @@ impl Drop for ClockCache {
 }
 
 impl ClockCache {
-    pub fn new(cache_total_size: usize, cache_size: usize) -> Self {
-        let seg_cnt = cache_total_size / SEGMENT_SIZE;
-        let entry_size = cache_size + std::mem::size_of::<EntryMeta>();
+    pub fn new(initial_cache_size: usize, entry_size: usize) -> Self {
+        let seg_cnt = initial_cache_size / SEGMENT_SIZE;
+        let entry_size = entry_size + std::mem::size_of::<EntryMeta>();
 
         assert!(seg_cnt > 0);
 
