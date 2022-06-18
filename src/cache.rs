@@ -77,6 +77,12 @@ impl<'a> SegmentIter<'a> {
             _lock: ManuallyDrop::new(lock),
         }
     }
+
+    /// Consumes the segment and returns the internal raw pointer.
+    /// The pointer is size of SEGMENT_SIZE
+    pub fn into_raw(self) -> *mut u8 {
+        self.segment as *mut u8
+    }
 }
 
 impl<'a> Iterator for SegmentIter<'a> {
