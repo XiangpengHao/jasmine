@@ -1,4 +1,4 @@
 mod backoff;
 mod cache;
 
-pub use cache::{ClockCache, EntryMeta, EntryMetaUnpacked, SegmentIter, SEGMENT_SIZE};
+pub use cache::{ClockCache, EntryMeta, EntryMetaUnpacked, Segment, SegmentIter, SEGMENT_SIZE};

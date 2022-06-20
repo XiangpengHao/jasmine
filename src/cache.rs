@@ -14,7 +14,7 @@ pub const SEGMENT_SIZE: usize = 4 * 1024; // 4KB
 const SEGMENT_ALIGN: usize = 0x0fff;
 
 /// The unit of cache allocation
-struct Segment {
+pub struct Segment {
     next: AtomicPtr<Segment>,
     migration_lock: spin::RwLock<()>,
 }
@@ -36,12 +36,12 @@ impl Segment {
         ptr as *mut Segment
     }
 
-    fn alloc() -> *mut u8 {
+    pub fn alloc() -> *mut u8 {
         let seg_layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
         unsafe { std::alloc::alloc_zeroed(seg_layout) }
     }
 
-    unsafe fn dealloc(ptr: *mut u8) {
+    pub unsafe fn dealloc(ptr: *mut u8) {
         std::alloc::dealloc(
             ptr,
             std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap(),
