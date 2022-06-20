@@ -227,8 +227,6 @@ impl ClockCache {
         let seg_cnt = initial_cache_size / SEGMENT_SIZE;
         let entry_size = entry_size + std::mem::size_of::<EntryMeta>();
 
-        assert!(seg_cnt > 0);
-
         let mut first: *mut Segment = std::ptr::null_mut();
         let mut prev: *mut Segment = std::ptr::null_mut();
         for i in 0..seg_cnt {
@@ -252,7 +250,13 @@ impl ClockCache {
             }
             prev = ptr;
         }
-        let first_entry = unsafe { &*first }.first_entry();
+
+        let first_entry = if seg_cnt > 0 {
+            unsafe { &*first }.first_entry()
+        } else {
+            std::ptr::null_mut()
+        };
+
         ClockCache {
             segments: AtomicPtr::new(first),
             probe_loc: AtomicPtr::new(first_entry),
@@ -497,6 +501,12 @@ mod test {
 
             (ptr as usize - first as usize) / self.entry_size
         }
+    }
+
+    #[cfg(not(feature = "shuttle"))]
+    #[test]
+    fn empty_cache() {
+        let _cache = ClockCache::new(0, std::mem::size_of::<TestEntry>());
     }
 
     #[cfg(not(feature = "shuttle"))]
