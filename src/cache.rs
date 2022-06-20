@@ -49,39 +49,59 @@ impl Segment {
     }
 }
 
-pub struct SegmentIter<'a> {
-    segment: *const Segment,
-    cur_entry: Option<*mut EntryMeta>,
+pub struct ObsoleteSegment<'a> {
+    ptr: *mut Segment,
     entry_size: usize,
-    _lock: ManuallyDrop<RwLockWriteGuard<'a, ()>>, // never drop the lock (marking it as obsolete)
+    _lock: ManuallyDrop<RwLockWriteGuard<'a, ()>>,
 }
 
-unsafe impl Send for SegmentIter<'_> {}
-unsafe impl Sync for SegmentIter<'_> {}
-
-impl Drop for SegmentIter<'_> {
+impl Drop for ObsoleteSegment<'_> {
     fn drop(&mut self) {
         unsafe {
-            Segment::dealloc(self.segment as *mut Segment as *mut u8);
+            Segment::dealloc(self.ptr as *mut u8);
         }
         // don't drop the lock (marking it as obsolete)
     }
 }
 
-impl<'a> SegmentIter<'a> {
-    fn new(segment: *const Segment, entry_size: usize, lock: RwLockWriteGuard<'a, ()>) -> Self {
+impl<'a> ObsoleteSegment<'a> {
+    fn new(ptr: *mut Segment, entry_size: usize, lock: RwLockWriteGuard<'a, ()>) -> Self {
         Self {
-            segment,
-            cur_entry: Some(unsafe { &*segment }.first_entry()),
+            ptr,
             entry_size,
             _lock: ManuallyDrop::new(lock),
         }
     }
 
+    pub fn iter<'b>(&'b self) -> SegmentIter<'b> {
+        SegmentIter::new(self.ptr, self.entry_size)
+    }
+
     /// Consumes the segment and returns the internal raw pointer.
     /// The pointer is size of SEGMENT_SIZE
     pub fn into_raw(self) -> *mut u8 {
-        self.segment as *mut u8
+        let ptr = self.ptr as *mut u8;
+        std::mem::forget(self);
+        ptr
+    }
+}
+
+pub struct SegmentIter<'a> {
+    cur_entry: Option<*mut EntryMeta>,
+    entry_size: usize,
+    phantom: std::marker::PhantomData<&'a ()>,
+}
+
+unsafe impl Send for SegmentIter<'_> {}
+unsafe impl Sync for SegmentIter<'_> {}
+
+impl<'a> SegmentIter<'a> {
+    fn new(segment: *const Segment, entry_size: usize) -> Self {
+        Self {
+            cur_entry: Some(unsafe { &*segment }.first_entry()),
+            entry_size,
+            phantom: std::marker::PhantomData,
+        }
     }
 }
 
@@ -263,7 +283,7 @@ impl ClockCache {
     /// As long as the lock guard is held, not other thread can promote entry to this segment
     ///
     /// Returns None when all segments in the cache are removed
-    pub fn remove_segment(&self) -> Option<SegmentIter<'static>> {
+    pub fn remove_segment(&self) -> Option<ObsoleteSegment<'static>> {
         // step 1: loop over all segments to find one that we can acquire write lock
         let backoff = Backoff::new();
         let mut prev = self.segments.load(Ordering::Relaxed);
@@ -315,7 +335,7 @@ impl ClockCache {
             self.segments.store(next, Ordering::Relaxed);
         }
 
-        Some(SegmentIter::new(cur, self.entry_size, lock_guard))
+        Some(ObsoleteSegment::new(cur, self.entry_size, lock_guard))
     }
 
     /// Optional current segment lock, this is just a performance optimization
@@ -599,7 +619,7 @@ mod test {
                 Some(seg_iter) => seg_iter,
                 None => break,
             };
-            for _entry in seg_iter {
+            for _entry in seg_iter.iter() {
                 evicted += 1;
             }
 
