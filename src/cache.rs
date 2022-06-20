@@ -64,6 +64,9 @@ impl Drop for ObsoleteSegment<'_> {
     }
 }
 
+unsafe impl Send for ObsoleteSegment<'_> {}
+unsafe impl Sync for ObsoleteSegment<'_> {}
+
 impl<'a> ObsoleteSegment<'a> {
     fn new(ptr: *mut Segment, entry_size: usize, lock: RwLockWriteGuard<'a, ()>) -> Self {
         Self {
@@ -73,7 +76,7 @@ impl<'a> ObsoleteSegment<'a> {
         }
     }
 
-    pub fn iter<'b>(&'b self) -> SegmentIter<'b> {
+    pub fn iter<'b>(&'_ self) -> SegmentIter<'b> {
         SegmentIter::new(self.ptr, self.entry_size)
     }
 
