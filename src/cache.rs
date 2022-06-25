@@ -284,6 +284,8 @@ impl ClockCache {
         new_segment.next.store(cur_next, Ordering::Relaxed);
         { &*cur }.next.store(ptr, Ordering::Relaxed);
         self.segments.store(ptr, Ordering::Release);
+        self.probe_loc
+            .store(new_segment.first_entry(), Ordering::Release);
     }
 
     /// The caller need to iterate all the entries in the segment and evict them
