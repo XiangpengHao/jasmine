@@ -9,8 +9,9 @@ use spin::{rwlock::RwLockWriteGuard, RwLockReadGuard};
 use std::mem::ManuallyDrop;
 
 /// Jasmine manages memory at the granularity of segments.
-pub const SEGMENT_SIZE: usize = 2 * 1024 * 1024; // 2MB
-const SEGMENT_ALIGN: usize = 0x1f_ffff;
+pub const SEGMENT_SIZE: usize = 4 * 1024; // 2MB
+// const SEGMENT_ALIGN: usize = 0x1f_ffff;
+const SEGMENT_ALIGN: usize = 0x0fff;
 
 /// The unit of cache allocation
 pub struct Segment {
