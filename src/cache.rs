@@ -217,6 +217,11 @@ impl Drop for ClockCache {
             if next == start {
                 break;
             }
+
+            assert!(
+                !cur.is_null(),
+                "segments are circularly linked so it can't be null"
+            );
             cur = next;
         }
     }
@@ -281,6 +286,7 @@ impl ClockCache {
         let new_segment = { &*ptr };
 
         if cur.is_null() {
+            new_segment.next.store(ptr, Ordering::Relaxed);
             self.segments.store(ptr, Ordering::Release);
         } else {
             let cur_next = { &*cur }.next.load(Ordering::Relaxed);
@@ -582,6 +588,14 @@ mod test {
         assert_eq!(entry_meta.referenced, false);
         assert_eq!(entry_meta.occupied, false);
         entry_meta
+    }
+
+    #[test]
+    fn empty_add_segment() {
+        let cache = ClockCache::new(0, std::mem::size_of::<TestEntry>());
+        unsafe {
+            cache.add_segment(Segment::alloc());
+        }
     }
 
     #[test]
