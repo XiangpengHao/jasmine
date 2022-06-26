@@ -273,17 +273,23 @@ impl ClockCache {
     /// The only safe and stable way to get a ptr is to call `Segment::alloc()`.
     pub unsafe fn add_segment(&self, ptr: *mut u8) {
         let cur = self.segments.load(Ordering::Relaxed);
-        let cur_next = { &*cur }.next.load(Ordering::Relaxed);
 
         {
             std::ptr::write_bytes(ptr, 0, SEGMENT_SIZE);
         }
         let ptr = ptr as *mut Segment;
-
         let new_segment = { &*ptr };
-        new_segment.next.store(cur_next, Ordering::Relaxed);
-        { &*cur }.next.store(ptr, Ordering::Relaxed);
-        self.segments.store(ptr, Ordering::Release);
+
+        if cur.is_null() {
+            self.segments.store(ptr, Ordering::Release);
+        } else {
+            let cur_next = { &*cur }.next.load(Ordering::Relaxed);
+
+            new_segment.next.store(cur_next, Ordering::Relaxed);
+            { &*cur }.next.store(ptr, Ordering::Relaxed);
+            self.segments.store(ptr, Ordering::Release);
+        }
+
         self.probe_loc
             .store(new_segment.first_entry(), Ordering::Release);
     }
