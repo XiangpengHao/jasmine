@@ -9,9 +9,8 @@ use spin::{rwlock::RwLockWriteGuard, RwLockReadGuard};
 use std::mem::ManuallyDrop;
 
 /// Jasmine manages memory at the granularity of segments.
-pub const SEGMENT_SIZE: usize = 4 * 1024; // 2MB
-// const SEGMENT_ALIGN: usize = 0x1f_ffff;
-const SEGMENT_ALIGN: usize = 0x0fff;
+pub const SEGMENT_SIZE: usize = 2 * 1024 * 1024; // 2MB
+const SEGMENT_ALIGN: usize = SEGMENT_SIZE - 1;
 
 /// The unit of cache allocation
 pub struct Segment {
@@ -41,6 +40,8 @@ impl Segment {
         unsafe { std::alloc::alloc_zeroed(seg_layout) }
     }
 
+    /// # Safety
+    /// Deallocate a segment, the ptr must be allocated from Segment::alloc().
     pub unsafe fn dealloc(ptr: *mut u8) {
         std::alloc::dealloc(
             ptr,
@@ -695,10 +696,9 @@ mod test {
     fn multi_thread_add_remove_segment() {
         let seg_cnt = 1;
         let cache_size = SEGMENT_SIZE * seg_cnt;
-        let entry_size = std::mem::size_of::<TestEntry>() * 10; // increase entry size to increase the probability of contention
+        let entry_per_seg = 13;
+        let entry_size = EFFECTIVE_SEGMENT_SIZE / 13; // increase entry size to increase the probability of contention
 
-        let entry_per_seg =
-            EFFECTIVE_SEGMENT_SIZE / (entry_size + std::mem::size_of::<EntryMeta>());
         let cache = ClockCache::new(cache_size, entry_size);
         let cache = Arc::new(cache);
 
@@ -752,10 +752,10 @@ mod test {
     fn multi_thread_basic() {
         let seg_cnt = 2;
         let cache_size = SEGMENT_SIZE * seg_cnt;
-        let entry_size = std::mem::size_of::<TestEntry>() * 10; // increase entry size to increase the probability of contention
 
-        let entry_per_seg =
-            EFFECTIVE_SEGMENT_SIZE / (entry_size + std::mem::size_of::<EntryMeta>());
+        let entry_per_seg = 12;
+        let entry_size = EFFECTIVE_SEGMENT_SIZE / entry_per_seg; // increase entry size to increase the probability of contention
+
         let cache_capacity = entry_per_seg * seg_cnt;
         let cache = ClockCache::new(cache_size, entry_size);
         let cache = Arc::new(cache);
