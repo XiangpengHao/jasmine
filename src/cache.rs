@@ -788,14 +788,8 @@ mod test {
     fn shuttle_add_remove_segment() {
         let config = shuttle::Config::default();
         let mut runner = shuttle::PortfolioRunner::new(true, config);
-        runner.add(shuttle::scheduler::PctScheduler::new(5, 5_000));
-        runner.add(shuttle::scheduler::PctScheduler::new(5, 5_000));
-        runner.add(shuttle::scheduler::PctScheduler::new(5, 5_000));
-        runner.add(shuttle::scheduler::PctScheduler::new(5, 5_000));
-        runner.add(shuttle::scheduler::RandomScheduler::new(5_000));
-        runner.add(shuttle::scheduler::RandomScheduler::new(5_000));
-        runner.add(shuttle::scheduler::RandomScheduler::new(5_000));
-        runner.add(shuttle::scheduler::RandomScheduler::new(5_000));
+        runner.add(shuttle::scheduler::PctScheduler::new(5, 40_000));
+        runner.add(shuttle::scheduler::RandomScheduler::new(40_000));
         runner.run(multi_thread_add_remove_segment);
     }
 
@@ -804,14 +798,8 @@ mod test {
     fn shuttle_basic() {
         let config = shuttle::Config::default();
         let mut runner = shuttle::PortfolioRunner::new(true, config);
-        runner.add(shuttle::scheduler::PctScheduler::new(5, 5_000));
-        runner.add(shuttle::scheduler::PctScheduler::new(5, 5_000));
-        runner.add(shuttle::scheduler::PctScheduler::new(5, 5_000));
-        runner.add(shuttle::scheduler::PctScheduler::new(5, 5_000));
-        runner.add(shuttle::scheduler::RandomScheduler::new(5_000));
-        runner.add(shuttle::scheduler::RandomScheduler::new(5_000));
-        runner.add(shuttle::scheduler::RandomScheduler::new(5_000));
-        runner.add(shuttle::scheduler::RandomScheduler::new(5_000));
+        runner.add(shuttle::scheduler::PctScheduler::new(5, 40_000));
+        runner.add(shuttle::scheduler::RandomScheduler::new(40_000));
         runner.run(multi_thread_basic);
     }
 
