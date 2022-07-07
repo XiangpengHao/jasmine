@@ -22,6 +22,9 @@ pub struct Segment {
 #[cfg(not(feature = "shuttle"))]
 static_assertions::const_assert_eq!(std::mem::size_of::<Segment>(), 16);
 
+#[cfg(feature = "mmap")]
+static SEGMENT_ADDR_START: std::sync::Mutex<usize> = std::sync::Mutex::new(0x5800_0000_0000);
+
 impl Segment {
     fn first_entry(&self) -> *mut EntryMeta {
         unsafe {
@@ -36,17 +39,51 @@ impl Segment {
     }
 
     pub fn alloc() -> *mut u8 {
-        let seg_layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
-        unsafe { std::alloc::alloc_zeroed(seg_layout) }
+        #[cfg(feature = "mmap")]
+        {
+            let mut val = SEGMENT_ADDR_START.lock().unwrap();
+            let addr = *val;
+            *val += SEGMENT_SIZE;
+            let ptr = unsafe {
+                libc::mmap(
+                    addr as *mut libc::c_void,
+                    SEGMENT_SIZE,
+                    libc::PROT_WRITE | libc::PROT_READ,
+                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE | libc::MAP_FIXED,
+                    -1,
+                    0,
+                )
+            } as *mut u8;
+
+            assert!(ptr as isize != -1);
+            assert!(ptr as isize != 0);
+
+            // we don't need to write zeros as MAP_ANONYMOUS will erase the content
+            ptr
+        }
+        #[cfg(not(feature = "mmap"))]
+        unsafe {
+            let seg_layout =
+                std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
+            std::alloc::alloc_zeroed(seg_layout)
+        }
     }
 
     /// # Safety
     /// Deallocate a segment, the ptr must be allocated from Segment::alloc().
     pub unsafe fn dealloc(ptr: *mut u8) {
-        std::alloc::dealloc(
-            ptr,
-            std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap(),
-        );
+        #[cfg(not(feature = "mmap"))]
+        {
+            std::alloc::dealloc(
+                ptr,
+                std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap(),
+            );
+        }
+
+        #[cfg(feature = "mmap")]
+        {
+            libc::munmap(ptr as *mut libc::c_void, SEGMENT_SIZE);
+        }
     }
 }
 
