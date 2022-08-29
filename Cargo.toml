@@ -12,12 +12,12 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libc = { version =  "0.2.126", optional = true }
-spin = "0.9.3"
+libc = { version = "0.2.132", optional = true }
+spin = "0.9.4"
 
 [dev-dependencies]
-shuttle = "0.1.0"
-crossbeam = "0.8.1"
+shuttle = "0.2.0"
+crossbeam = "0.8.2"
 static_assertions = "1.1.0"
 
 [features]
