@@ -65,7 +65,8 @@ fn basic() {
         let prob_loc = cache.get_prob_loc_idx();
         assert_eq!(prob_loc, i % entry_per_seg);
         let entry = cache.probe_entry().unwrap();
-        let mut entry_meta = assert_empty_entry(entry);
+        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
+        assert_empty_entry(entry);
 
         let test_entry = TestEntry::init(i as u16);
         let cached_ptr = entry.data_ptr() as *mut TestEntry;
@@ -92,6 +93,7 @@ fn basic() {
         assert!(entry.is_none());
     }
 
+    // visit again, now every probe_entry will return a entry to evict.
     for _i in 0..cache_capacity {
         let entry = cache.probe_entry().unwrap();
         let entry_meta = entry.load_meta(Ordering::Relaxed);
@@ -103,15 +105,36 @@ fn basic() {
         unsafe { &*cached_ptr }.sanity_check();
     }
 
+    // visit again, now every probe_entry will return a entry to evict.
+    let new_entry = TestEntry::init(cache_capacity as u16);
+    let byte_stream = unsafe {
+        std::slice::from_raw_parts(
+            &new_entry as *const TestEntry as *const u8,
+            std::mem::size_of_val(&new_entry),
+        )
+    };
+    for _i in 0..cache_capacity {
+        cache
+            .probe_entry_evict(&byte_stream, |v| {
+                let val = unsafe { &*(v as *const TestEntry) };
+                val.sanity_check();
+            })
+            .unwrap();
+    }
+    for ptr in allocated.iter() {
+        let val = unsafe { &**ptr };
+        val.sanity_check();
+        assert_eq!(val.val[0], cache_capacity as u16);
+    }
+
     std::mem::drop(cache);
 }
 
-fn assert_empty_entry(entry: &EntryMeta) -> EntryMetaUnpacked {
+fn assert_empty_entry(entry: &EntryMeta) {
     let entry_meta = entry.load_meta(Ordering::Relaxed);
     assert_eq!(entry_meta.held, true);
     assert_eq!(entry_meta.referenced, false);
     assert_eq!(entry_meta.occupied, false);
-    entry_meta
 }
 
 #[test]
@@ -135,7 +158,8 @@ fn add_remove_segment() {
 
     for i in 1..=entry_per_seg {
         let entry = cache.probe_entry().unwrap();
-        let mut entry_meta = assert_empty_entry(entry);
+        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
+        assert_empty_entry(entry);
 
         let test_entry = TestEntry::init(i as u16);
         let cached_ptr = entry.data_ptr() as *mut TestEntry;
@@ -156,7 +180,8 @@ fn add_remove_segment() {
 
     for i in 1..=entry_per_seg {
         let entry = cache.probe_entry().unwrap();
-        let mut entry_meta = assert_empty_entry(entry);
+        assert_empty_entry(entry);
+        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
 
         let test_entry = TestEntry::init((i + entry_per_seg) as u16);
         let cached_ptr = entry.data_ptr() as *mut TestEntry;
@@ -195,14 +220,17 @@ fn thread_probe_entry(cache: &ClockCache, i: usize) {
     let entry = cache.probe_entry();
     match entry {
         Some(e) => {
-            let meta = e.load_meta(Ordering::Relaxed);
-            if meta.referenced {
+            let mut meta = e.load_meta(Ordering::Relaxed);
+            if meta.held {
                 // means the entry is ready to write
                 let val = TestEntry::init(i as u16);
                 let ptr = e.data_ptr() as *mut TestEntry;
                 unsafe {
                     ptr.write(val);
                 }
+                meta.held = false;
+                meta.referenced = true;
+                meta.occupied = true;
                 e.set_meta(meta, Ordering::Relaxed);
             } else {
                 // the entry was occupied, we check its sanity

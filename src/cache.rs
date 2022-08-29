@@ -468,6 +468,8 @@ impl ClockCache {
     /// The caller need to check the reserved bit, if not set, this entry need to be evicted to the storage
     ///
     /// Unless the reserved bit is set (the entry is empty), it is the caller's responsibility to serialize the concurrent read/write.
+    /// It is not impossible for two threads to return the same entry, especially when the cache size is small (probing wrapped around is unlikely)
+    /// However, in practice, the caller can assume that calling `probe_entry` is serialized.
     ///
     /// There are two cases this function may return None:
     /// 1. The cache is empty (due to `remove_segment`)
@@ -513,13 +515,54 @@ impl ClockCache {
         None
     }
 
-    pub fn probe_entry_evict(&self) {
-        match self.probe_entry() {
-            Some(e) => {
-                let meta = e.load_meta(Ordering::Acquire);
-                if meta.held {}
+    pub fn probe_entry_evict<F: FnOnce(*mut u8)>(
+        &self,
+        new_data: &[u8],
+        evict_callback: F,
+    ) -> Option<()> {
+        assert!(new_data.len() < self.entry_size);
+
+        let e = self.probe_entry()?;
+
+        let mut meta = e.load_meta(Ordering::Acquire);
+
+        if meta.referenced {
+            // rare case that a concurrent thread set the referenced value after we probed the entry.
+            // this is very unlikely as we use a single probe ptr.
+            return None;
+        }
+
+        if meta.held {
+            // the entry was empty, no eviction needed.
+            let ptr = e.data_ptr();
+
+            unsafe {
+                std::ptr::copy_nonoverlapping(new_data.as_ptr(), ptr, new_data.len());
             }
-            None => {}
-        };
+
+            meta.held = false;
+            meta.referenced = true;
+            meta.occupied = true;
+            e.set_meta(meta, Ordering::Release);
+            return Some(());
+        }
+
+        if meta.occupied {
+            // the entry has value. To evict it, we first need to hold the entry
+            assert!(!meta.held);
+            assert!(!meta.referenced);
+
+            evict_callback(e.data_ptr());
+
+            unsafe {
+                std::ptr::copy_nonoverlapping(new_data.as_ptr(), e.data_ptr(), new_data.len());
+            }
+            meta.held = false;
+            meta.referenced = true;
+            meta.occupied = true;
+            e.set_meta(meta, Ordering::Release);
+            return Some(());
+        }
+        unreachable!();
     }
 }
