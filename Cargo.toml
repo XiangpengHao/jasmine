@@ -2,6 +2,12 @@
 name = "jasmine"
 version = "0.1.1"
 edition = "2021"
+description = "Jasmine is a scalable cache with clock replacement policy. The cache size and grow and shrink on demand."
+keywords = ["cache", "clock-cache", "concurrent"]
+repository = "https://github.com/XiangpengHao/jasmine"
+readme = "README.md"
+authors = ["Xiangpeng Hao <haoxiangpeng123@gmail.com>"]
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
