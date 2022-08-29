@@ -1,5 +1,5 @@
 [package]
-name = "jasmine"
+name = "jasmine-db"
 version = "0.1.1"
 edition = "2021"
 description = "Jasmine is a scalable cache with clock replacement policy. The cache size and grow and shrink on demand."
