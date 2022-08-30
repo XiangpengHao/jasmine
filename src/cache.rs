@@ -474,7 +474,7 @@ impl ClockCache {
     /// There are two cases this function may return None:
     /// 1. The cache is empty (due to `remove_segment`)
     /// 2. The all the entries are referenced within the probe_len (default to 16)
-    pub fn probe_entry(&self) -> Option<&EntryMeta> {
+    pub(crate) fn probe_entry(&self) -> Option<&EntryMeta> {
         let mut seg_lock = None;
         for _p in 0..self.probe_len {
             let (cur_entry, cur_lock) = self.next_entry(seg_lock)?;
@@ -515,13 +515,23 @@ impl ClockCache {
         None
     }
 
-    pub fn probe_entry_evict<F: FnOnce(*mut u8)>(
+    /// Returns whether we find a cached location.
+    /// If yes, returns the cached location and evict the old one.
+    ///
+    /// The caller need to check the reserved bit, if not set, this entry need to be evicted to the storage
+    ///
+    /// Unless the reserved bit is set (the entry is empty), it is the caller's responsibility to serialize the concurrent read/write.
+    /// It is not impossible for two threads to return the same entry, especially when the cache size is small (probing wrapped around is unlikely)
+    /// However, in practice, the caller can assume that calling `probe_entry` is serialized.
+    ///
+    /// There are two cases this function may return None:
+    /// 1. The cache is empty (due to `remove_segment`)
+    /// 2. The all the entries are referenced within the probe_len (default to 16)
+    pub fn probe_entry_evict<Fill: FnOnce(*mut u8), Evict: FnOnce(*mut u8)>(
         &self,
-        new_data: &[u8],
-        evict_callback: F,
+        fill_data_callback: Fill,
+        evict_callback: Evict,
     ) -> Option<()> {
-        assert!(new_data.len() < self.entry_size);
-
         let e = self.probe_entry()?;
 
         let mut meta = e.load_meta(Ordering::Acquire);
@@ -536,9 +546,7 @@ impl ClockCache {
             // the entry was empty, no eviction needed.
             let ptr = e.data_ptr();
 
-            unsafe {
-                std::ptr::copy_nonoverlapping(new_data.as_ptr(), ptr, new_data.len());
-            }
+            fill_data_callback(ptr);
 
             meta.held = false;
             meta.referenced = true;
@@ -548,15 +556,12 @@ impl ClockCache {
         }
 
         if meta.occupied {
-            // the entry has value. To evict it, we first need to hold the entry
             assert!(!meta.held);
             assert!(!meta.referenced);
 
             evict_callback(e.data_ptr());
 
-            unsafe {
-                std::ptr::copy_nonoverlapping(new_data.as_ptr(), e.data_ptr(), new_data.len());
-            }
+            fill_data_callback(e.data_ptr());
             meta.held = false;
             meta.referenced = true;
             meta.occupied = true;

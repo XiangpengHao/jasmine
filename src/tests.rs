@@ -115,10 +115,15 @@ fn basic() {
     };
     for _i in 0..cache_capacity {
         cache
-            .probe_entry_evict(&byte_stream, |v| {
-                let val = unsafe { &*(v as *const TestEntry) };
-                val.sanity_check();
-            })
+            .probe_entry_evict(
+                |p: *mut u8| unsafe {
+                    std::ptr::copy_nonoverlapping(byte_stream.as_ptr(), p, byte_stream.len());
+                },
+                |p: *mut u8| {
+                    let val = unsafe { &*(p as *const TestEntry) };
+                    val.sanity_check();
+                },
+            )
             .unwrap();
     }
     for ptr in allocated.iter() {
