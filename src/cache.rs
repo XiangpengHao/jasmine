@@ -515,7 +515,7 @@ impl ClockCache {
         None
     }
 
-    /// Returns whether we find a cached location.
+    /// Returns the cache entry address, if found.
     /// If find, it evicts the old entry (if any) using the `evict_callback`, then fill in the new data using the `fill_data_callback`.
     /// Both the callbacks get the entry pointer as input, note that each entry has exactly one byte of metadata right before the data pointer,
     /// The caller should not change it.
@@ -538,7 +538,7 @@ impl ClockCache {
         &self,
         evict_callback: Evict,
         fill_callback: Fill,
-    ) -> Result<(), JasmineError> {
+    ) -> Result<*mut u8, JasmineError> {
         let e = self.probe_entry().ok_or(JasmineError::NeedRetry)?;
 
         let mut meta = e.load_meta(Ordering::Acquire);
@@ -559,7 +559,7 @@ impl ClockCache {
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            return Ok(());
+            return Ok(ptr);
         }
 
         if meta.occupied {
@@ -573,7 +573,7 @@ impl ClockCache {
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            return Ok(());
+            return Ok(e.data_ptr());
         }
         unreachable!();
     }
