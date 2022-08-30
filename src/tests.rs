@@ -118,6 +118,7 @@ fn basic() {
             .probe_entry_evict(
                 |p: *mut u8| unsafe {
                     std::ptr::copy_nonoverlapping(byte_stream.as_ptr(), p, byte_stream.len());
+                    Ok(())
                 },
                 |p: *mut u8| {
                     let val = unsafe { &*(p as *const TestEntry) };

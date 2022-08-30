@@ -4,7 +4,7 @@ use shuttle::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 #[cfg(not(all(feature = "shuttle", test)))]
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
-use crate::backoff::Backoff;
+use crate::{backoff::Backoff, JasmineError};
 use spin::{rwlock::RwLockWriteGuard, RwLockReadGuard};
 use std::mem::ManuallyDrop;
 
@@ -527,46 +527,53 @@ impl ClockCache {
     /// There are two cases this function may return None:
     /// 1. The cache is empty (due to `remove_segment`)
     /// 2. The all the entries are referenced within the probe_len (default to 16)
-    pub fn probe_entry_evict<Fill: FnOnce(*mut u8), Evict: FnOnce(*mut u8)>(
+    ///
+    /// Invariants:
+    /// 1. Fill callback can never fail, it will only be called once, and after called, the function returns Ok.
+    /// 2. Evict callback can fail, if it fails, it returns Err and fill callback will not be called.
+    pub fn probe_entry_evict<
+        Evict: FnOnce(*mut u8) -> Result<(), JasmineError>,
+        Fill: FnOnce(*mut u8),
+    >(
         &self,
         evict_callback: Evict,
-        fill_data_callback: Fill,
-    ) -> Option<()> {
-        let e = self.probe_entry()?;
+        fill_callback: Fill,
+    ) -> Result<(), JasmineError> {
+        let e = self.probe_entry().ok_or(JasmineError::NeedRetry)?;
 
         let mut meta = e.load_meta(Ordering::Acquire);
 
         if meta.referenced {
             // rare case that a concurrent thread set the referenced value after we probed the entry.
             // this is very unlikely as we use a single probe ptr.
-            return None;
+            return Err(JasmineError::NeedRetry);
         }
 
         if meta.held {
             // the entry was empty, no eviction needed.
             let ptr = e.data_ptr();
 
-            fill_data_callback(ptr);
+            fill_callback(ptr);
 
             meta.held = false;
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            return Some(());
+            return Ok(());
         }
 
         if meta.occupied {
             assert!(!meta.held);
             assert!(!meta.referenced);
 
-            evict_callback(e.data_ptr());
+            evict_callback(e.data_ptr())?;
 
-            fill_data_callback(e.data_ptr());
+            fill_callback(e.data_ptr());
             meta.held = false;
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            return Some(());
+            return Ok(());
         }
         unreachable!();
     }
