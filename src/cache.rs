@@ -516,9 +516,9 @@ impl ClockCache {
     }
 
     /// Returns whether we find a cached location.
-    /// If yes, returns the cached location and evict the old one.
-    ///
-    /// The caller need to check the reserved bit, if not set, this entry need to be evicted to the storage
+    /// If find, it evicts the old entry (if any) using the `evict_callback`, then fill in the new data using the `fill_data_callback`.
+    /// Both the callbacks get the entry pointer as input, note that each entry has exactly one byte of metadata right before the data pointer,
+    /// The caller should not change it.
     ///
     /// Unless the reserved bit is set (the entry is empty), it is the caller's responsibility to serialize the concurrent read/write.
     /// It is not impossible for two threads to return the same entry, especially when the cache size is small (probing wrapped around is unlikely)
@@ -529,8 +529,8 @@ impl ClockCache {
     /// 2. The all the entries are referenced within the probe_len (default to 16)
     pub fn probe_entry_evict<Fill: FnOnce(*mut u8), Evict: FnOnce(*mut u8)>(
         &self,
-        fill_data_callback: Fill,
         evict_callback: Evict,
+        fill_data_callback: Fill,
     ) -> Option<()> {
         let e = self.probe_entry()?;
 
