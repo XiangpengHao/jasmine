@@ -33,10 +33,10 @@ impl TestEntry {
 }
 
 impl ClockCache {
-    fn get_prob_loc_idx(&self) -> usize {
+    fn get_prob_loc_idx(&self, entry_align: usize) -> usize {
         let ptr = self.probe_loc.load(Ordering::Relaxed);
         let segment = Segment::from_entry(ptr);
-        let first = unsafe { &*segment }.first_entry();
+        let first = unsafe { &*segment }.first_entry(entry_align);
 
         (ptr as usize - first as usize) / self.entry_size
     }
@@ -45,7 +45,7 @@ impl ClockCache {
 #[cfg(not(feature = "shuttle"))]
 #[test]
 fn empty_cache() {
-    let _cache = ClockCache::new(0, std::mem::size_of::<TestEntry>());
+    let _cache = ClockCache::new(0, std::mem::size_of::<TestEntry>(), 2);
 }
 
 #[cfg(not(feature = "shuttle"))]
@@ -55,14 +55,13 @@ fn basic() {
     let cache_size = SEGMENT_SIZE * seg_cnt;
     let entry_size = std::mem::size_of::<TestEntry>();
 
-    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / (entry_size + std::mem::size_of::<EntryMeta>());
+    let cache = ClockCache::new(cache_size, entry_size, 2);
+    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_size;
     let cache_capacity = entry_per_seg * seg_cnt;
-    let cache = ClockCache::new(cache_size, entry_size);
-
     let mut allocated = vec![];
 
     for i in 0..cache_capacity {
-        let prob_loc = cache.get_prob_loc_idx();
+        let prob_loc = cache.get_prob_loc_idx(2);
         assert_eq!(prob_loc, i % entry_per_seg);
         let entry = cache.probe_entry().unwrap();
         let mut entry_meta = entry.load_meta(Ordering::Relaxed);
@@ -84,10 +83,10 @@ fn basic() {
     }
 
     // now the cache is full, probe entry will reset the reference bit
-    let mut prob_loc = cache.get_prob_loc_idx();
+    let mut prob_loc = cache.get_prob_loc_idx(2);
     for _i in 0..cache_capacity / 16 {
         let entry = cache.probe_entry();
-        let new_loc = cache.get_prob_loc_idx();
+        let new_loc = cache.get_prob_loc_idx(2);
         assert_eq!(new_loc, (16 + prob_loc) % entry_per_seg);
         prob_loc = new_loc;
         assert!(entry.is_none());
@@ -145,7 +144,7 @@ fn assert_empty_entry(entry: &EntryMeta) {
 
 #[test]
 fn empty_add_segment() {
-    let cache = ClockCache::new(0, std::mem::size_of::<TestEntry>());
+    let cache = ClockCache::new(0, std::mem::size_of::<TestEntry>(), 2);
     unsafe {
         cache.add_segment(Segment::alloc());
     }
@@ -157,8 +156,8 @@ fn add_remove_segment() {
     let cache_size = SEGMENT_SIZE * seg_cnt;
     let entry_size = std::mem::size_of::<TestEntry>();
 
-    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / (entry_size + std::mem::size_of::<EntryMeta>());
-    let cache = ClockCache::new(cache_size, entry_size);
+    let cache = ClockCache::new(cache_size, entry_size, 2);
+    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_size;
 
     let mut allocated = vec![];
 
@@ -255,7 +254,7 @@ fn multi_thread_add_remove_segment() {
     let entry_per_seg = 13;
     let entry_size = EFFECTIVE_SEGMENT_SIZE / 13; // increase entry size to increase the probability of contention
 
-    let cache = ClockCache::new(cache_size, entry_size);
+    let cache = ClockCache::new(cache_size, entry_size, 2);
     let cache = Arc::new(cache);
 
     let probe_thread_cnt = 2;
@@ -313,7 +312,7 @@ fn multi_thread_basic() {
     let entry_size = EFFECTIVE_SEGMENT_SIZE / entry_per_seg; // increase entry size to increase the probability of contention
 
     let cache_capacity = entry_per_seg * seg_cnt;
-    let cache = ClockCache::new(cache_size, entry_size);
+    let cache = ClockCache::new(cache_size, entry_size, 2);
     let cache = Arc::new(cache);
 
     let thread_cnt = 3;

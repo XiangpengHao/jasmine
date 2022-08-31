@@ -25,12 +25,20 @@ static_assertions::const_assert_eq!(std::mem::size_of::<Segment>(), 16);
 #[cfg(feature = "mmap")]
 static SEGMENT_ADDR_START: std::sync::Mutex<usize> = std::sync::Mutex::new(0x5800_0000_0000);
 
+/// Align the given `size` upwards to alignment `align`.
+///
+/// Requires that `align` is a power of two.
+fn align_up(size: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two());
+    (size + align - 1) & !(align - 1)
+}
+
 impl Segment {
-    pub(crate) fn first_entry(&self) -> *mut EntryMeta {
-        unsafe {
-            (self as *const Segment as *mut u8).add(std::mem::size_of::<Segment>())
-                as *mut EntryMeta
-        }
+    pub(crate) fn first_entry(&self, entry_align: usize) -> *mut EntryMeta {
+        let ptr = unsafe { (self as *const Segment as *mut u8).add(std::mem::size_of::<Segment>()) }
+            as usize;
+        let ptr = align_up(ptr, entry_align);
+        ptr as *mut EntryMeta
     }
 
     pub(crate) fn from_entry(ptr: *const EntryMeta) -> *const Segment {
@@ -90,6 +98,7 @@ impl Segment {
 pub struct ObsoleteSegment<'a> {
     ptr: *mut Segment,
     entry_size: usize,
+    entry_align: usize,
     _lock: ManuallyDrop<RwLockWriteGuard<'a, ()>>,
 }
 
@@ -106,16 +115,22 @@ unsafe impl Send for ObsoleteSegment<'_> {}
 unsafe impl Sync for ObsoleteSegment<'_> {}
 
 impl<'a> ObsoleteSegment<'a> {
-    fn new(ptr: *mut Segment, entry_size: usize, lock: RwLockWriteGuard<'a, ()>) -> Self {
+    fn new(
+        ptr: *mut Segment,
+        entry_size: usize,
+        entry_align: usize,
+        lock: RwLockWriteGuard<'a, ()>,
+    ) -> Self {
         Self {
             ptr,
             entry_size,
+            entry_align,
             _lock: ManuallyDrop::new(lock),
         }
     }
 
     pub fn iter<'b>(&'_ self) -> SegmentIter<'b> {
-        SegmentIter::new(self.ptr, self.entry_size)
+        SegmentIter::new(self.ptr, self.entry_size, self.entry_align)
     }
 
     /// Consumes the segment and returns the internal raw pointer.
@@ -137,9 +152,9 @@ unsafe impl Send for SegmentIter<'_> {}
 unsafe impl Sync for SegmentIter<'_> {}
 
 impl<'a> SegmentIter<'a> {
-    fn new(segment: *const Segment, entry_size: usize) -> Self {
+    fn new(segment: *const Segment, entry_size: usize, entry_align: usize) -> Self {
         Self {
-            cur_entry: Some(unsafe { &*segment }.first_entry()),
+            cur_entry: Some(unsafe { &*segment }.first_entry(entry_align)),
             entry_size,
             phantom: std::marker::PhantomData,
         }
@@ -236,6 +251,7 @@ pub struct ClockCache {
     segments: AtomicPtr<Segment>, // a doubly-linked circular buffer
     probe_len: usize,
     pub(crate) entry_size: usize, // the size of the cache entry + entry meta
+    entry_align: usize,           // is power of two
     pub(crate) probe_loc: AtomicPtr<EntryMeta>,
 }
 
@@ -266,9 +282,14 @@ impl Drop for ClockCache {
 }
 
 impl ClockCache {
-    pub fn new(initial_cache_size: usize, entry_size: usize) -> Self {
-        let seg_cnt = initial_cache_size / SEGMENT_SIZE;
+    pub fn new(cache_size_byte: usize, entry_size: usize, entry_align: usize) -> Self {
+        assert!(
+            entry_align.is_power_of_two(),
+            "entry_align must be a power of two"
+        );
+        let seg_cnt = cache_size_byte / SEGMENT_SIZE;
         let entry_size = entry_size + std::mem::size_of::<EntryMeta>();
+        let entry_size = align_up(entry_size, entry_align);
 
         let mut first: *mut Segment = std::ptr::null_mut();
         let mut prev: *mut Segment = std::ptr::null_mut();
@@ -295,7 +316,7 @@ impl ClockCache {
         }
 
         let first_entry = if seg_cnt > 0 {
-            unsafe { &*first }.first_entry()
+            unsafe { &*first }.first_entry(entry_align)
         } else {
             std::ptr::null_mut()
         };
@@ -305,6 +326,7 @@ impl ClockCache {
             probe_loc: AtomicPtr::new(first_entry),
             probe_len: 16,
             entry_size,
+            entry_align,
         }
     }
 
@@ -335,7 +357,7 @@ impl ClockCache {
         }
 
         self.probe_loc
-            .store(new_segment.first_entry(), Ordering::Release);
+            .store(new_segment.first_entry(self.entry_align), Ordering::Release);
     }
 
     /// The caller need to iterate all the entries in the segment and evict them
@@ -380,8 +402,10 @@ impl ClockCache {
                     .store(std::ptr::null_mut(), Ordering::Release);
             } else {
                 // the prob_loc is in the current segment, we need to update to next segment
-                self.probe_loc
-                    .store(unsafe { &*next }.first_entry(), Ordering::Release);
+                self.probe_loc.store(
+                    unsafe { &*next }.first_entry(self.entry_align),
+                    Ordering::Release,
+                );
             }
         }
 
@@ -394,7 +418,12 @@ impl ClockCache {
             self.segments.store(next, Ordering::Relaxed);
         }
 
-        Some(ObsoleteSegment::new(cur, self.entry_size, lock_guard))
+        Some(ObsoleteSegment::new(
+            cur,
+            self.entry_size,
+            self.entry_align,
+            lock_guard,
+        ))
     }
 
     /// Optional current segment lock, this is just a performance optimization
@@ -434,7 +463,7 @@ impl ClockCache {
                     let segment = unsafe { &*cur_segment }.next.load(Ordering::Relaxed);
 
                     if let Some(seg_lock) = unsafe { &*segment }.migration_lock.try_read() {
-                        let new_entry = unsafe { &*segment }.first_entry();
+                        let new_entry = unsafe { &*segment }.first_entry(self.entry_align);
                         (new_entry, seg_lock)
                     } else {
                         cur_entry = self.probe_loc.load(Ordering::Relaxed);
