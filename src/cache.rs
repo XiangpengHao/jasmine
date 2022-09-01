@@ -609,7 +609,7 @@ impl ClockCache {
 
     /// Mark the entry as referenced so that it won't be evicted too soon.
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
-    pub fn mark_referenced(&self, entry: *mut EntryMeta) {
+    pub unsafe fn mark_referenced(&self, entry: *mut EntryMeta) {
         let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
         meta.referenced = true;
         unsafe {
