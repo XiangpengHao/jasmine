@@ -1,8 +1,8 @@
 #[cfg(all(feature = "shuttle", test))]
-use shuttle::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use shuttle::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(not(all(feature = "shuttle", test)))]
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use crate::{backoff::Backoff, JasmineError};
 use spin::{rwlock::RwLockWriteGuard, RwLockReadGuard};
@@ -253,6 +253,7 @@ pub struct ClockCache {
     pub(crate) entry_size: usize, // the size of the cache entry + entry meta
     entry_align: usize,           // is power of two
     pub(crate) probe_loc: AtomicPtr<EntryMeta>,
+    segment_cnt: AtomicUsize,
 }
 
 impl Drop for ClockCache {
@@ -327,7 +328,12 @@ impl ClockCache {
             probe_len: 16,
             entry_size,
             entry_align,
+            segment_cnt: AtomicUsize::new(seg_cnt),
         }
+    }
+
+    pub fn cache_size(&self) -> usize {
+        self.segment_cnt.load(Ordering::Relaxed) * SEGMENT_SIZE
     }
 
     /// only one thread at any time should call this function
@@ -355,6 +361,8 @@ impl ClockCache {
             { &*cur }.next.store(ptr, Ordering::Relaxed);
             self.segments.store(ptr, Ordering::Release);
         }
+
+        self.segment_cnt.fetch_add(1, Ordering::Relaxed);
 
         self.probe_loc
             .store(new_segment.first_entry(self.entry_align), Ordering::Release);
@@ -410,6 +418,8 @@ impl ClockCache {
         }
 
         unsafe { &*prev }.next.store(next, Ordering::Relaxed);
+
+        self.segment_cnt.fetch_sub(1, Ordering::Relaxed);
 
         if next == cur {
             // this is the last segment, we are done
