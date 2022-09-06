@@ -1,3 +1,5 @@
+use nanorand::Rng;
+
 use crate::ClockCache;
 
 pub struct ShardCache<const N: usize> {
@@ -7,6 +9,11 @@ pub struct ShardCache<const N: usize> {
 impl<const N: usize> ShardCache<N> {
     pub fn get_random(&self, rng: &mut impl rand::Rng) -> &ClockCache {
         let index = rng.gen_range(0..N);
+        unsafe { self.sub_cache.get_unchecked(index) }
+    }
+
+    pub fn get(&self) -> &ClockCache {
+        let index = nanorand::tls_rng().generate_range(0..N);
         unsafe { self.sub_cache.get_unchecked(index) }
     }
 
