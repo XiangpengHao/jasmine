@@ -1,6 +1,6 @@
 use nanorand::Rng;
 
-use crate::ClockCache;
+use crate::{ClockCache, EntryMeta};
 
 pub struct ShardCache<const N: usize> {
     sub_cache: [ClockCache; N],
@@ -38,5 +38,21 @@ impl<const N: usize> ShardCache<N> {
             res
         };
         Self { sub_cache }
+    }
+
+    pub fn cache_size(&self) -> usize {
+        let mut seg_cnt = 0;
+        for s in self.sub_cache.iter() {
+            seg_cnt += s.cache_size();
+        }
+        seg_cnt
+    }
+
+    pub unsafe fn mark_referenced(&self, entry: *mut EntryMeta) {
+        let mut meta = unsafe { &*entry }.load_meta(std::sync::atomic::Ordering::Relaxed);
+        meta.referenced = true;
+        unsafe {
+            (*entry).set_meta(meta, std::sync::atomic::Ordering::Release);
+        }
     }
 }
