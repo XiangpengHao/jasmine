@@ -13,6 +13,7 @@ license = "MIT"
 
 [dependencies]
 libc = { version = "0.2.132", optional = true }
+rand = "0.8.5"
 spin = "0.9.4"
 
 [dev-dependencies]
