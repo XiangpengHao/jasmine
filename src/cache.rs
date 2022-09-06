@@ -513,10 +513,11 @@ impl ClockCache {
     /// There are two cases this function may return None:
     /// 1. The cache is empty (due to `remove_segment`)
     /// 2. The all the entries are referenced within the probe_len (default to 16)
-    pub(crate) fn probe_entry(&self) -> Option<&EntryMeta> {
+    pub(crate) fn probe_entry(&self) -> Result<&EntryMeta, JasmineError> {
         let mut seg_lock = None;
         for _p in 0..self.probe_len {
-            let (cur_entry, cur_lock) = self.next_entry(seg_lock)?;
+            let (cur_entry, cur_lock) =
+                self.next_entry(seg_lock).ok_or(JasmineError::CacheEmpty)?;
             seg_lock = Some(cur_lock);
 
             let entry = match unsafe { &*cur_entry }.meta.compare_exchange_weak(
@@ -547,11 +548,11 @@ impl ClockCache {
             };
 
             if let Some(entry) = entry {
-                return Some(unsafe { &*entry });
+                return Ok(unsafe { &*entry });
             }
         }
 
-        None
+        Err(JasmineError::ProbeLimitExceeded)
     }
 
     /// Returns the (cache entry address, whether evict happens), if found.
@@ -570,15 +571,12 @@ impl ClockCache {
     /// Invariants:
     /// 1. Fill callback can never fail, it will only be called once, and after called, the function returns Ok.
     /// 2. Evict callback can fail, if it fails, it returns Err and fill callback will not be called.
-    pub fn probe_entry_evict<
-        Evict: FnOnce(*mut u8) -> Result<(), JasmineError>,
-        Fill: FnOnce(*mut u8),
-    >(
+    pub fn probe_entry_evict<Evict: FnOnce(*mut u8) -> Option<()>, Fill: FnOnce(*mut u8)>(
         &self,
         evict_callback: Evict,
         fill_callback: Fill,
     ) -> Result<(*mut u8, bool), JasmineError> {
-        let e = self.probe_entry().ok_or(JasmineError::NeedRetry)?;
+        let e = self.probe_entry()?;
 
         let mut meta = e.load_meta(Ordering::Acquire);
 
@@ -605,7 +603,7 @@ impl ClockCache {
             assert!(!meta.held);
             assert!(!meta.referenced);
 
-            evict_callback(e.data_ptr())?;
+            evict_callback(e.data_ptr()).ok_or(JasmineError::EvictFailure)?;
 
             fill_callback(e.data_ptr());
             meta.held = false;
