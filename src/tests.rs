@@ -89,7 +89,7 @@ fn basic() {
         let new_loc = cache.get_prob_loc_idx(2);
         assert_eq!(new_loc, (16 + prob_loc) % entry_per_seg);
         prob_loc = new_loc;
-        assert!(entry.is_none());
+        assert!(entry.is_err());
     }
 
     // visit again, now every probe_entry will return a entry to evict.
@@ -117,7 +117,7 @@ fn basic() {
             .probe_entry_evict(
                 |p: *mut u8| unsafe {
                     std::ptr::copy_nonoverlapping(byte_stream.as_ptr(), p, byte_stream.len());
-                    Ok(())
+                    Some(())
                 },
                 |p: *mut u8| {
                     let val = unsafe { &*(p as *const TestEntry) };
@@ -178,7 +178,7 @@ fn add_remove_segment() {
     // move the cursor to next segment
     for _i in 0..entry_per_seg / 16 {
         let entry = cache.probe_entry();
-        assert!(entry.is_none());
+        assert!(entry.is_err());
     }
 
     unsafe { cache.add_segment(Segment::alloc()) };
@@ -216,7 +216,7 @@ fn add_remove_segment() {
 
     for _i in 0..10 {
         let entry = cache.probe_entry();
-        assert!(entry.is_none());
+        assert!(entry.is_err());
     }
     std::mem::drop(cache);
 }
@@ -224,7 +224,7 @@ fn add_remove_segment() {
 fn thread_probe_entry(cache: &ClockCache, i: usize) {
     let entry = cache.probe_entry();
     match entry {
-        Some(e) => {
+        Ok(e) => {
             let mut meta = e.load_meta(Ordering::Relaxed);
             if meta.held {
                 // means the entry is ready to write
@@ -243,7 +243,7 @@ fn thread_probe_entry(cache: &ClockCache, i: usize) {
                 unsafe { &*ptr }.sanity_check();
             }
         }
-        None => {}
+        Err(_) => {}
     }
 }
 
