@@ -1,3 +1,4 @@
+use douhua::{Allocator, MemType};
 #[cfg(all(feature = "shuttle", test))]
 use shuttle::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
@@ -46,7 +47,7 @@ impl Segment {
         ptr as *mut Segment
     }
 
-    pub fn alloc() -> *mut u8 {
+    pub fn alloc(mem_type: MemType) -> *mut u8 {
         #[cfg(feature = "mmap")]
         {
             let mut val = SEGMENT_ADDR_START.lock().unwrap();
@@ -73,19 +74,21 @@ impl Segment {
         unsafe {
             let seg_layout =
                 std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
-            std::alloc::alloc_zeroed(seg_layout)
+
+            Allocator::get()
+                .alloc_zeroed(seg_layout, mem_type)
+                .expect("OOM")
+            // std::alloc::alloc_zeroed(seg_layout)
         }
     }
 
     /// # Safety
     /// Deallocate a segment, the ptr must be allocated from Segment::alloc().
-    pub unsafe fn dealloc(ptr: *mut u8) {
+    pub unsafe fn dealloc(ptr: *mut u8, mem_type: MemType) {
         #[cfg(not(feature = "mmap"))]
         {
-            std::alloc::dealloc(
-                ptr,
-                std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap(),
-            );
+            let layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();,
+           Allocator::get().dealloc(ptr, layout);
         }
 
         #[cfg(feature = "mmap")]
@@ -254,6 +257,7 @@ pub struct ClockCache {
     entry_align: usize,           // is power of two
     pub(crate) probe_loc: AtomicPtr<EntryMeta>,
     segment_cnt: AtomicUsize,
+    mem_type: MemType,
 }
 
 impl Drop for ClockCache {
@@ -283,7 +287,12 @@ impl Drop for ClockCache {
 }
 
 impl ClockCache {
-    pub fn new(cache_size_byte: usize, entry_size: usize, entry_align: usize) -> Self {
+    pub fn new(
+        cache_size_byte: usize,
+        entry_size: usize,
+        entry_align: usize,
+        mem_type: douhua::MemType,
+    ) -> Self {
         assert!(
             entry_align.is_power_of_two(),
             "entry_align must be a power of two"
@@ -295,7 +304,7 @@ impl ClockCache {
         let mut first: *mut Segment = std::ptr::null_mut();
         let mut prev: *mut Segment = std::ptr::null_mut();
         for i in 0..seg_cnt {
-            let ptr = Segment::alloc() as *mut Segment;
+            let ptr = Segment::alloc(mem_type) as *mut Segment;
             unsafe {
                 (*ptr).next = AtomicPtr::new(std::ptr::null_mut());
             }
@@ -328,6 +337,7 @@ impl ClockCache {
             probe_len: 16,
             entry_size,
             entry_align,
+            mem_type,
             segment_cnt: AtomicUsize::new(seg_cnt),
         }
     }

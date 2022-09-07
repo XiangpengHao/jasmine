@@ -16,6 +16,7 @@ libc = { version = "0.2.132", optional = true }
 nanorand = "0.7.0"
 rand = "0.8.5"
 spin = "0.9.4"
+douhua = { git = "https://github.com/XiangpengHao/douhua.git", branch = "numa" }
 
 [dev-dependencies]
 shuttle = "0.2.0"
