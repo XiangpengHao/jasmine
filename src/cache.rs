@@ -87,8 +87,8 @@ impl Segment {
     pub unsafe fn dealloc(ptr: *mut u8, mem_type: MemType) {
         #[cfg(not(feature = "mmap"))]
         {
-            let layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();,
-           Allocator::get().dealloc(ptr, layout);
+            let layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
+            Allocator::get().dealloc(ptr, layout, mem_type);
         }
 
         #[cfg(feature = "mmap")]
@@ -101,6 +101,7 @@ impl Segment {
 pub struct ObsoleteSegment<'a> {
     ptr: *mut Segment,
     entry_size: usize,
+    mem_type: MemType,
     entry_align: usize,
     _lock: ManuallyDrop<RwLockWriteGuard<'a, ()>>,
 }
@@ -108,7 +109,7 @@ pub struct ObsoleteSegment<'a> {
 impl Drop for ObsoleteSegment<'_> {
     fn drop(&mut self) {
         unsafe {
-            Segment::dealloc(self.ptr as *mut u8);
+            Segment::dealloc(self.ptr as *mut u8, self.mem_type);
         }
         // don't drop the lock (marking it as obsolete)
     }
@@ -122,12 +123,14 @@ impl<'a> ObsoleteSegment<'a> {
         ptr: *mut Segment,
         entry_size: usize,
         entry_align: usize,
+        mem_type: MemType,
         lock: RwLockWriteGuard<'a, ()>,
     ) -> Self {
         Self {
             ptr,
             entry_size,
             entry_align,
+            mem_type,
             _lock: ManuallyDrop::new(lock),
         }
     }
@@ -271,7 +274,7 @@ impl Drop for ClockCache {
         loop {
             let next = unsafe { &*cur }.next.load(Ordering::Relaxed);
             unsafe {
-                Segment::dealloc(cur as *mut u8);
+                Segment::dealloc(cur as *mut u8, self.mem_type);
             }
             if next == start {
                 break;
@@ -442,6 +445,7 @@ impl ClockCache {
             cur,
             self.entry_size,
             self.entry_align,
+            self.mem_type,
             lock_guard,
         ))
     }

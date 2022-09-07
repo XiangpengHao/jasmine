@@ -45,7 +45,12 @@ impl ClockCache {
 #[cfg(not(feature = "shuttle"))]
 #[test]
 fn empty_cache() {
-    let _cache = ClockCache::new(0, std::mem::size_of::<TestEntry>(), 2);
+    let _cache = ClockCache::new(
+        0,
+        std::mem::size_of::<TestEntry>(),
+        2,
+        douhua::MemType::DRAM,
+    );
 }
 
 #[cfg(not(feature = "shuttle"))]
@@ -55,7 +60,7 @@ fn basic() {
     let cache_size = SEGMENT_SIZE * seg_cnt;
     let entry_size = std::mem::size_of::<TestEntry>();
 
-    let cache = ClockCache::new(cache_size, entry_size, 2);
+    let cache = ClockCache::new(cache_size, entry_size, 2, douhua::MemType::DRAM);
     let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_size;
     let cache_capacity = entry_per_seg * seg_cnt;
     let mut allocated = vec![];
@@ -144,9 +149,14 @@ fn assert_empty_entry(entry: &EntryMeta) {
 
 #[test]
 fn empty_add_segment() {
-    let cache = ClockCache::new(0, std::mem::size_of::<TestEntry>(), 2);
+    let cache = ClockCache::new(
+        0,
+        std::mem::size_of::<TestEntry>(),
+        2,
+        douhua::MemType::DRAM,
+    );
     unsafe {
-        cache.add_segment(Segment::alloc());
+        cache.add_segment(Segment::alloc(douhua::MemType::DRAM));
     }
 }
 
@@ -156,7 +166,7 @@ fn add_remove_segment() {
     let cache_size = SEGMENT_SIZE * seg_cnt;
     let entry_size = std::mem::size_of::<TestEntry>();
 
-    let cache = ClockCache::new(cache_size, entry_size, 2);
+    let cache = ClockCache::new(cache_size, entry_size, 2, douhua::MemType::DRAM);
     let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_size;
 
     let mut allocated = vec![];
@@ -181,7 +191,7 @@ fn add_remove_segment() {
         assert!(entry.is_err());
     }
 
-    unsafe { cache.add_segment(Segment::alloc()) };
+    unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
 
     for i in 1..=entry_per_seg {
         let entry = cache.probe_entry().unwrap();
@@ -254,7 +264,7 @@ fn multi_thread_add_remove_segment() {
     let entry_per_seg = 13;
     let entry_size = EFFECTIVE_SEGMENT_SIZE / 13; // increase entry size to increase the probability of contention
 
-    let cache = ClockCache::new(cache_size, entry_size, 2);
+    let cache = ClockCache::new(cache_size, entry_size, 2, douhua::MemType::DRAM);
     let cache = Arc::new(cache);
 
     let probe_thread_cnt = 2;
@@ -272,7 +282,7 @@ fn multi_thread_add_remove_segment() {
     let cache = cache.clone();
     thread_handlers.push(thread::spawn(move || {
         let mut pin = crossbeam::epoch::pin();
-        unsafe { cache.add_segment(Segment::alloc()) };
+        unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
 
         for i in 1..=entry_per_seg {
             pin.repin();
@@ -312,7 +322,7 @@ fn multi_thread_basic() {
     let entry_size = EFFECTIVE_SEGMENT_SIZE / entry_per_seg; // increase entry size to increase the probability of contention
 
     let cache_capacity = entry_per_seg * seg_cnt;
-    let cache = ClockCache::new(cache_size, entry_size, 2);
+    let cache = ClockCache::new(cache_size, entry_size, 2, douhua::MemType::DRAM);
     let cache = Arc::new(cache);
 
     let thread_cnt = 3;
