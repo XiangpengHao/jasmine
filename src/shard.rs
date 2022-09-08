@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use douhua::MemType;
 use nanorand::Rng;
 
@@ -59,10 +61,24 @@ impl<const N: usize> ShardCache<N> {
     /// # Safety
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
     pub unsafe fn mark_referenced(&self, entry: *mut EntryMeta) {
-        let mut meta = unsafe { &*entry }.load_meta(std::sync::atomic::Ordering::Relaxed);
+        let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
         meta.referenced = true;
         unsafe {
-            (*entry).set_meta(meta, std::sync::atomic::Ordering::Release);
+            (*entry).set_meta(meta, Ordering::Release);
+        }
+    }
+
+    /// Mark the entry as empty.
+    ///
+    /// # Safety
+    /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
+    pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
+        let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
+        meta.held = false;
+        meta.referenced = false;
+        meta.occupied = false;
+        unsafe {
+            (*entry).set_meta(meta, Ordering::Release);
         }
     }
 }
