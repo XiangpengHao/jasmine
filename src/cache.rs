@@ -562,11 +562,15 @@ impl ClockCache {
     /// Invariants:
     /// 1. Fill callback can never fail, it will only be called once, and after called, the function returns Ok.
     /// 2. Evict callback can fail, if it fails, it returns Err and fill callback will not be called.
-    pub fn probe_entry_evict<Evict: FnOnce(*mut u8) -> Option<()>, Fill: FnOnce(*mut u8)>(
+    pub fn probe_entry_evict<
+        Evict: FnOnce(*mut u8) -> Option<()>,
+        Fill: FnOnce(*mut u8) -> RT,
+        RT,
+    >(
         &self,
         evict_callback: Evict,
         fill_callback: Fill,
-    ) -> Result<(*mut u8, bool), JasmineError> {
+    ) -> Result<(RT, bool), JasmineError> {
         let e = self.probe_entry()?;
 
         let mut meta = e.load_meta(Ordering::Acquire);
@@ -576,23 +580,23 @@ impl ClockCache {
         if meta.occupied {
             evict_callback(e.data_ptr()).ok_or(JasmineError::EvictFailure)?;
 
-            fill_callback(e.data_ptr());
+            let filled = fill_callback(e.data_ptr());
             meta.locked = false;
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            Ok((e.data_ptr(), true))
+            Ok((filled, true))
         } else {
             // the entry was empty, no eviction needed.
             let ptr = e.data_ptr();
 
-            fill_callback(ptr);
+            let filled = fill_callback(ptr);
 
             meta.locked = false;
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            Ok((ptr, false))
+            Ok((filled, false))
         }
     }
 

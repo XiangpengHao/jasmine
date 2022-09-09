@@ -87,11 +87,12 @@ fn basic() {
                     let test_entry = TestEntry::init(i as u16);
                     let cached_ptr = ptr as *mut TestEntry;
                     unsafe { cached_ptr.write(test_entry) };
+                    cached_ptr
                 },
             )
             .unwrap();
 
-        allocated.push(entry as *const TestEntry);
+        allocated.push(entry);
     }
 
     for ptr in allocated.iter() {
@@ -171,11 +172,12 @@ fn add_remove_segment() {
                     let test_entry = TestEntry::init(i as u16);
                     let cached_ptr = ptr as *mut TestEntry;
                     unsafe { cached_ptr.write(test_entry) };
+                    cached_ptr
                 },
             )
             .unwrap();
 
-        allocated.push(entry as *const TestEntry);
+        allocated.push(entry);
     }
 
     // move the cursor to next segment
@@ -194,11 +196,12 @@ fn add_remove_segment() {
                     let test_entry = TestEntry::init((i + entry_per_seg) as u16);
                     let cached_ptr = ptr as *mut TestEntry;
                     unsafe { cached_ptr.write(test_entry) };
+                    cached_ptr
                 },
             )
             .unwrap();
 
-        allocated.push(entry as *const TestEntry);
+        allocated.push(entry);
     }
 
     for ptr in allocated.iter() {
