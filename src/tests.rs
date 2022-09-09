@@ -1,12 +1,18 @@
 #[cfg(feature = "shuttle")]
 use shuttle::{
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
 };
 
 #[cfg(not(feature = "shuttle"))]
 use std::{
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
 };
 
@@ -16,12 +22,16 @@ use crate::*;
 
 #[derive(Default)]
 struct TestEntry {
+    lock: AtomicBool,
     val: [u16; 28],
 }
 
 impl TestEntry {
     fn init(val: u16) -> Self {
-        TestEntry { val: [val; 28] }
+        TestEntry {
+            lock: AtomicBool::new(false),
+            val: [val; 28],
+        }
     }
 
     fn sanity_check(&self) {
@@ -68,19 +78,20 @@ fn basic() {
     for i in 0..cache_capacity {
         let prob_loc = cache.get_prob_loc_idx(2);
         assert_eq!(prob_loc, i % entry_per_seg);
-        let entry = cache.probe_entry().unwrap();
-        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
-        assert_empty_entry(entry);
+        let (entry, _evicted) = cache
+            .probe_entry_evict(
+                |_ptr| {
+                    unreachable!("should not evict");
+                },
+                |ptr| {
+                    let test_entry = TestEntry::init(i as u16);
+                    let cached_ptr = ptr as *mut TestEntry;
+                    unsafe { cached_ptr.write(test_entry) };
+                },
+            )
+            .unwrap();
 
-        let test_entry = TestEntry::init(i as u16);
-        let cached_ptr = entry.data_ptr() as *mut TestEntry;
-        unsafe { cached_ptr.write(test_entry) };
-        allocated.push(cached_ptr);
-
-        entry_meta.held = false;
-        entry_meta.referenced = true;
-        entry_meta.occupied = true;
-        entry.set_meta(entry_meta, Ordering::Relaxed);
+        allocated.push(entry as *const TestEntry);
     }
 
     for ptr in allocated.iter() {
@@ -90,23 +101,11 @@ fn basic() {
     // now the cache is full, probe entry will reset the reference bit
     let mut prob_loc = cache.get_prob_loc_idx(2);
     for _i in 0..cache_capacity / 16 {
-        let entry = cache.probe_entry();
+        let entry = cache.probe_entry_evict(|_v| unreachable!(), |_v| unreachable!());
         let new_loc = cache.get_prob_loc_idx(2);
         assert_eq!(new_loc, (16 + prob_loc) % entry_per_seg);
         prob_loc = new_loc;
         assert!(entry.is_err());
-    }
-
-    // visit again, now every probe_entry will return a entry to evict.
-    for _i in 0..cache_capacity {
-        let entry = cache.probe_entry().unwrap();
-        let entry_meta = entry.load_meta(Ordering::Relaxed);
-        assert_eq!(entry_meta.referenced, false);
-        assert_eq!(entry_meta.held, false);
-        assert_eq!(entry_meta.occupied, true);
-
-        let cached_ptr = entry.data_ptr() as *mut TestEntry;
-        unsafe { &*cached_ptr }.sanity_check();
     }
 
     // visit again, now every probe_entry will return a entry to evict.
@@ -140,13 +139,6 @@ fn basic() {
     std::mem::drop(cache);
 }
 
-fn assert_empty_entry(entry: &EntryMeta) {
-    let entry_meta = entry.load_meta(Ordering::Relaxed);
-    assert_eq!(entry_meta.held, true);
-    assert_eq!(entry_meta.referenced, false);
-    assert_eq!(entry_meta.occupied, false);
-}
-
 #[test]
 fn empty_add_segment() {
     let cache = ClockCache::new(
@@ -172,39 +164,41 @@ fn add_remove_segment() {
     let mut allocated = vec![];
 
     for i in 1..=entry_per_seg {
-        let entry = cache.probe_entry().unwrap();
-        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
-        assert_empty_entry(entry);
+        let (entry, _evicted) = cache
+            .probe_entry_evict(
+                |_ptr| unreachable!(),
+                |ptr| {
+                    let test_entry = TestEntry::init(i as u16);
+                    let cached_ptr = ptr as *mut TestEntry;
+                    unsafe { cached_ptr.write(test_entry) };
+                },
+            )
+            .unwrap();
 
-        let test_entry = TestEntry::init(i as u16);
-        let cached_ptr = entry.data_ptr() as *mut TestEntry;
-        unsafe { cached_ptr.write(test_entry) };
-        allocated.push(cached_ptr);
-
-        entry_meta.set_occupied();
-        entry.set_meta(entry_meta, Ordering::Relaxed);
+        allocated.push(entry as *const TestEntry);
     }
 
     // move the cursor to next segment
     for _i in 0..entry_per_seg / 16 {
-        let entry = cache.probe_entry();
+        let entry = cache.probe_entry_evict(|_ptr| unreachable!(), |_ptr| unreachable!());
         assert!(entry.is_err());
     }
 
     unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
 
     for i in 1..=entry_per_seg {
-        let entry = cache.probe_entry().unwrap();
-        assert_empty_entry(entry);
-        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
+        let (entry, _evicted) = cache
+            .probe_entry_evict(
+                |_ptr| unreachable!(),
+                |ptr| {
+                    let test_entry = TestEntry::init((i + entry_per_seg) as u16);
+                    let cached_ptr = ptr as *mut TestEntry;
+                    unsafe { cached_ptr.write(test_entry) };
+                },
+            )
+            .unwrap();
 
-        let test_entry = TestEntry::init((i + entry_per_seg) as u16);
-        let cached_ptr = entry.data_ptr() as *mut TestEntry;
-        unsafe { cached_ptr.write(test_entry) };
-        allocated.push(cached_ptr);
-
-        entry_meta.set_occupied();
-        entry.set_meta(entry_meta, Ordering::Relaxed);
+        allocated.push(entry as *const TestEntry);
     }
 
     for ptr in allocated.iter() {
@@ -225,36 +219,32 @@ fn add_remove_segment() {
     }
 
     for _i in 0..10 {
-        let entry = cache.probe_entry();
+        let entry = cache.probe_entry_evict(|_v| unreachable!(), |_v| unreachable!());
         assert!(entry.is_err());
     }
     std::mem::drop(cache);
 }
 
 fn thread_probe_entry(cache: &ClockCache, i: usize) {
-    let entry = cache.probe_entry();
-    match entry {
-        Ok(e) => {
-            let mut meta = e.load_meta(Ordering::Relaxed);
-            if meta.held {
-                // means the entry is ready to write
-                let val = TestEntry::init(i as u16);
-                let ptr = e.data_ptr() as *mut TestEntry;
-                unsafe {
-                    ptr.write(val);
-                }
-                meta.held = false;
-                meta.referenced = true;
-                meta.occupied = true;
-                e.set_meta(meta, Ordering::Relaxed);
-            } else {
-                // the entry was occupied, we check its sanity
-                let ptr = e.data_ptr() as *const TestEntry;
-                unsafe { &*ptr }.sanity_check();
-            }
+    let _= cache.probe_entry_evict(|ptr| {
+        // the entry was occupied, we check its sanity
+        let val = unsafe { &*(ptr as *const TestEntry) };
+        val.lock
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .expect("The lock should be false, because we should be the only one accessing the value.");
+        val.sanity_check();
+        val.lock
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .unwrap();
+            Some(())
+    }, |ptr| {
+        // means the entry is ready to write
+        let val = TestEntry::init(i as u16);
+        let ptr = ptr as *mut TestEntry;
+        unsafe {
+            ptr.write(val);
         }
-        Err(_) => {}
-    }
+    }) ;
 }
 
 #[test]

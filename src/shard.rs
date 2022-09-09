@@ -74,7 +74,7 @@ impl<const N: usize> ShardCache<N> {
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
     pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
         let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
-        meta.held = false;
+        meta.locked = false;
         meta.referenced = false;
         meta.occupied = false;
         unsafe {

@@ -23,9 +23,6 @@ pub struct Segment {
 #[cfg(not(feature = "shuttle"))]
 static_assertions::const_assert_eq!(std::mem::size_of::<Segment>(), 16);
 
-#[cfg(feature = "mmap")]
-static SEGMENT_ADDR_START: std::sync::Mutex<usize> = std::sync::Mutex::new(0x5800_0000_0000);
-
 /// Align the given `size` upwards to alignment `align`.
 ///
 /// Requires that `align` is a power of two.
@@ -48,29 +45,6 @@ impl Segment {
     }
 
     pub fn alloc(mem_type: MemType) -> *mut u8 {
-        #[cfg(feature = "mmap")]
-        {
-            let mut val = SEGMENT_ADDR_START.lock().unwrap();
-            let addr = *val;
-            *val += SEGMENT_SIZE;
-            let ptr = unsafe {
-                libc::mmap(
-                    addr as *mut libc::c_void,
-                    SEGMENT_SIZE,
-                    libc::PROT_WRITE | libc::PROT_READ,
-                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE | libc::MAP_FIXED,
-                    -1,
-                    0,
-                )
-            } as *mut u8;
-
-            assert!(ptr as isize != -1);
-            assert!(ptr as isize != 0);
-
-            // we don't need to write zeros as MAP_ANONYMOUS will erase the content
-            ptr
-        }
-        #[cfg(not(feature = "mmap"))]
         unsafe {
             let seg_layout =
                 std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
@@ -85,16 +59,8 @@ impl Segment {
     /// # Safety
     /// Deallocate a segment, the ptr must be allocated from Segment::alloc().
     pub unsafe fn dealloc(ptr: *mut u8, mem_type: MemType) {
-        #[cfg(not(feature = "mmap"))]
-        {
-            let layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
-            Allocator::get().dealloc(ptr, layout, mem_type);
-        }
-
-        #[cfg(feature = "mmap")]
-        {
-            libc::munmap(ptr as *mut libc::c_void, SEGMENT_SIZE);
-        }
+        let layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
+        Allocator::get().dealloc(ptr, layout, mem_type);
     }
 }
 
@@ -180,13 +146,13 @@ impl<'a> Iterator for SegmentIter<'a> {
 #[derive(Clone)]
 pub struct EntryMetaUnpacked {
     pub referenced: bool,
-    pub held: bool,
+    pub locked: bool,
     pub occupied: bool,
 }
 
 impl EntryMetaUnpacked {
     pub fn set_occupied(&mut self) {
-        self.held = false;
+        self.locked = false;
         self.occupied = true;
         self.referenced = true;
     }
@@ -195,21 +161,21 @@ impl EntryMetaUnpacked {
 impl From<u8> for EntryMetaUnpacked {
     fn from(value: u8) -> Self {
         EntryMetaUnpacked {
-            referenced: value & 1 > 0,
-            held: value & 0b10 > 0,
-            occupied: value & 0b100 > 0,
+            referenced: value & 1 == 1,
+            locked: value & 0b10 == 0b10,
+            occupied: value & 0b100 == 0b100,
         }
     }
 }
 
 impl From<EntryMetaUnpacked> for u8 {
     fn from(value: EntryMetaUnpacked) -> Self {
-        (value.occupied as u8) << 2 | (value.held as u8) << 1 | (value.referenced as u8)
+        (value.occupied as u8) << 2 | (value.locked as u8) << 1 | (value.referenced as u8)
     }
 }
 
 pub struct EntryMeta {
-    meta: AtomicU8, // ref: 1 bit, reserved: 1 bit
+    meta: AtomicU8,
 }
 
 impl EntryMeta {
@@ -534,36 +500,47 @@ impl ClockCache {
                 self.next_entry(seg_lock).ok_or(JasmineError::CacheEmpty)?;
             seg_lock = Some(cur_lock);
 
-            let entry = match unsafe { &*cur_entry }.meta.compare_exchange_weak(
+            match unsafe { &*cur_entry }.meta.compare_exchange_weak(
                 0,
                 0b10,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => Some(cur_entry),
+                Ok(_) => return Ok(unsafe { &*cur_entry }),
                 Err(v) => {
                     let mut meta = EntryMetaUnpacked::from(v);
 
-                    let reserved = meta.held;
-                    let referenced = meta.referenced;
-                    if meta.referenced {
+                    if meta.locked {
+                        continue;
+                    } else if meta.referenced {
                         meta.referenced = false;
-                        unsafe {
-                            (*cur_entry).meta.store(meta.into(), Ordering::Release);
-                        }
-                    }
-
-                    if reserved || referenced {
-                        None
+                        let _ = unsafe { &*cur_entry }.meta.compare_exchange_weak(
+                            v,
+                            meta.into(),
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        ); // we don't care if the CAS fails, but we need to use CAS so that we won't accidentally set other bits
+                        continue;
                     } else {
-                        Some(cur_entry)
+                        meta.locked = true;
+                        meta.referenced = true;
+                        meta.occupied = true;
+                        if unsafe { &*cur_entry }
+                            .meta
+                            .compare_exchange_weak(
+                                v,
+                                meta.into(),
+                                Ordering::Release,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                        {
+                            return Ok(unsafe { &*cur_entry });
+                        }
+                        continue;
                     }
                 }
             };
-
-            if let Some(entry) = entry {
-                return Ok(unsafe { &*entry });
-            }
         }
 
         Err(JasmineError::ProbeLimitExceeded)
@@ -594,39 +571,29 @@ impl ClockCache {
 
         let mut meta = e.load_meta(Ordering::Acquire);
 
-        if meta.referenced {
-            // rare case that a concurrent thread set the referenced value after we probed the entry.
-            // this is very unlikely as we use a single probe ptr.
-            return Err(JasmineError::NeedRetry);
-        }
+        assert!(meta.locked);
 
-        if meta.held {
+        if meta.occupied {
+            evict_callback(e.data_ptr()).ok_or(JasmineError::EvictFailure)?;
+
+            fill_callback(e.data_ptr());
+            meta.locked = false;
+            meta.referenced = true;
+            meta.occupied = true;
+            e.set_meta(meta, Ordering::Release);
+            Ok((e.data_ptr(), true))
+        } else {
             // the entry was empty, no eviction needed.
             let ptr = e.data_ptr();
 
             fill_callback(ptr);
 
-            meta.held = false;
+            meta.locked = false;
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            return Ok((ptr, false));
+            Ok((ptr, false))
         }
-
-        if meta.occupied {
-            assert!(!meta.held);
-            assert!(!meta.referenced);
-
-            evict_callback(e.data_ptr()).ok_or(JasmineError::EvictFailure)?;
-
-            fill_callback(e.data_ptr());
-            meta.held = false;
-            meta.referenced = true;
-            meta.occupied = true;
-            e.set_meta(meta, Ordering::Release);
-            return Ok((e.data_ptr(), true));
-        }
-        unreachable!();
     }
 
     /// Mark the entry as referenced so that it won't be evicted too soon.
@@ -647,7 +614,7 @@ impl ClockCache {
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
     pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
         let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
-        meta.held = false;
+        meta.locked = false;
         meta.referenced = false;
         meta.occupied = false;
         unsafe {
