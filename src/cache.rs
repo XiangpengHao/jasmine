@@ -625,4 +625,29 @@ impl ClockCache {
             (*entry).set_meta(meta, Ordering::Release);
         }
     }
+
+    pub unsafe fn pin_entry(&self, entry: *mut EntryMeta) -> Result<u8, u8> {
+        let meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
+        if meta.locked {
+            return Err(meta.into());
+        }
+        let mut new_meta = meta.clone();
+        new_meta.locked = true;
+
+        unsafe { &*entry }.meta.compare_exchange_weak(
+            meta.into(),
+            new_meta.into(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+    }
+
+    pub unsafe fn unpin_entry(&self, entry: *mut EntryMeta) {
+        let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
+        assert!(meta.locked);
+        meta.locked = false;
+        unsafe {
+            (*entry).set_meta(meta, Ordering::Release);
+        }
+    }
 }
