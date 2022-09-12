@@ -575,7 +575,7 @@ impl ClockCache {
 
         let mut meta = e.load_meta(Ordering::Acquire);
 
-        assert!(meta.locked);
+        // assert!(meta.locked);
 
         if meta.occupied {
             evict_callback(e.data_ptr()).ok_or(JasmineError::EvictFailure)?;
