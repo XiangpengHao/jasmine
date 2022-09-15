@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use crate::{backoff::Backoff, JasmineError};
 use spin::{rwlock::RwLockWriteGuard, RwLockReadGuard};
-use std::mem::ManuallyDrop;
+use std::{alloc::Layout, mem::ManuallyDrop};
 
 /// Jasmine manages memory at the granularity of segments.
 pub const SEGMENT_SIZE: usize = 2 * 1024 * 1024; // 2MB
@@ -66,9 +66,8 @@ impl Segment {
 
 pub struct ObsoleteSegment<'a> {
     ptr: *mut Segment,
-    entry_size: usize,
+    entry_layout: Layout,
     mem_type: MemType,
-    entry_align: usize,
     _lock: ManuallyDrop<RwLockWriteGuard<'a, ()>>,
 }
 
@@ -87,22 +86,20 @@ unsafe impl Sync for ObsoleteSegment<'_> {}
 impl<'a> ObsoleteSegment<'a> {
     fn new(
         ptr: *mut Segment,
-        entry_size: usize,
-        entry_align: usize,
+        entry_layout: Layout,
         mem_type: MemType,
         lock: RwLockWriteGuard<'a, ()>,
     ) -> Self {
         Self {
             ptr,
-            entry_size,
-            entry_align,
+            entry_layout,
             mem_type,
             _lock: ManuallyDrop::new(lock),
         }
     }
 
     pub fn iter<'b>(&'_ self) -> SegmentIter<'b> {
-        SegmentIter::new(self.ptr, self.entry_size, self.entry_align)
+        SegmentIter::new(self.ptr, self.entry_layout)
     }
 
     /// Consumes the segment and returns the internal raw pointer.
@@ -116,7 +113,7 @@ impl<'a> ObsoleteSegment<'a> {
 
 pub struct SegmentIter<'a> {
     cur_entry: Option<*mut EntryMeta>,
-    entry_size: usize,
+    entry_layout: Layout,
     phantom: std::marker::PhantomData<&'a ()>,
 }
 
@@ -124,10 +121,10 @@ unsafe impl Send for SegmentIter<'_> {}
 unsafe impl Sync for SegmentIter<'_> {}
 
 impl<'a> SegmentIter<'a> {
-    fn new(segment: *const Segment, entry_size: usize, entry_align: usize) -> Self {
+    fn new(segment: *const Segment, entry_layout: Layout) -> Self {
         Self {
-            cur_entry: Some(unsafe { &*segment }.first_entry(entry_align)),
-            entry_size,
+            cur_entry: Some(unsafe { &*segment }.first_entry(entry_layout.align())),
+            entry_layout,
             phantom: std::marker::PhantomData,
         }
     }
@@ -138,7 +135,7 @@ impl<'a> Iterator for SegmentIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let cur = self.cur_entry?;
-        self.cur_entry = unsafe { &*cur }.next_entry(self.entry_size);
+        self.cur_entry = unsafe { &*cur }.next_entry(self.entry_layout.size());
         Some(cur)
     }
 }
@@ -222,8 +219,7 @@ impl EntryMeta {
 pub struct ClockCache {
     segments: AtomicPtr<Segment>, // a doubly-linked circular buffer
     probe_len: usize,
-    pub(crate) entry_size: usize, // the size of the cache entry + entry meta
-    entry_align: usize,           // is power of two
+    pub(crate) entry_layout: Layout, // the layout of each entry, the size is with the metadata (1 byte)
     pub(crate) probe_loc: AtomicPtr<EntryMeta>,
     segment_cnt: AtomicUsize,
     mem_type: MemType,
@@ -256,19 +252,11 @@ impl Drop for ClockCache {
 }
 
 impl ClockCache {
-    pub fn new(
-        cache_size_byte: usize,
-        entry_size: usize,
-        entry_align: usize,
-        mem_type: douhua::MemType,
-    ) -> Self {
-        assert!(
-            entry_align.is_power_of_two(),
-            "entry_align must be a power of two"
-        );
+    pub fn new(cache_size_byte: usize, entry_layout: Layout, mem_type: douhua::MemType) -> Self {
         let seg_cnt = cache_size_byte / SEGMENT_SIZE;
-        let entry_size = entry_size + std::mem::size_of::<EntryMeta>();
-        let entry_size = align_up(entry_size, entry_align);
+        let entry_size = entry_layout.size() + std::mem::size_of::<EntryMeta>();
+        let entry_size = align_up(entry_size, entry_layout.align());
+        let entry_layout = Layout::from_size_align(entry_size, entry_layout.align()).unwrap();
 
         let mut first: *mut Segment = std::ptr::null_mut();
         let mut prev: *mut Segment = std::ptr::null_mut();
@@ -295,7 +283,7 @@ impl ClockCache {
         }
 
         let first_entry = if seg_cnt > 0 {
-            unsafe { &*first }.first_entry(entry_align)
+            unsafe { &*first }.first_entry(entry_layout.align())
         } else {
             std::ptr::null_mut()
         };
@@ -304,8 +292,7 @@ impl ClockCache {
             segments: AtomicPtr::new(first),
             probe_loc: AtomicPtr::new(first_entry),
             probe_len: 16,
-            entry_size,
-            entry_align,
+            entry_layout,
             mem_type,
             segment_cnt: AtomicUsize::new(seg_cnt),
         }
@@ -343,8 +330,10 @@ impl ClockCache {
 
         self.segment_cnt.fetch_add(1, Ordering::Relaxed);
 
-        self.probe_loc
-            .store(new_segment.first_entry(self.entry_align), Ordering::Release);
+        self.probe_loc.store(
+            new_segment.first_entry(self.entry_layout.align()),
+            Ordering::Release,
+        );
     }
 
     /// The caller need to iterate all the entries in the segment and evict them
@@ -390,7 +379,7 @@ impl ClockCache {
             } else {
                 // the prob_loc is in the current segment, we need to update to next segment
                 self.probe_loc.store(
-                    unsafe { &*next }.first_entry(self.entry_align),
+                    unsafe { &*next }.first_entry(self.entry_layout.align()),
                     Ordering::Release,
                 );
             }
@@ -409,8 +398,7 @@ impl ClockCache {
 
         Some(ObsoleteSegment::new(
             cur,
-            self.entry_size,
-            self.entry_align,
+            self.entry_layout,
             self.mem_type,
             lock_guard,
         ))
@@ -431,7 +419,7 @@ impl ClockCache {
             if cur_entry.is_null() {
                 return None;
             }
-            let (entry, lock) = match unsafe { &*cur_entry }.next_entry(self.entry_size) {
+            let (entry, lock) = match unsafe { &*cur_entry }.next_entry(self.entry_layout.size()) {
                 Some(v) => {
                     let seg_lock = match seg_lock {
                         Some(l) => l,
@@ -453,7 +441,7 @@ impl ClockCache {
                     let segment = unsafe { &*cur_segment }.next.load(Ordering::Relaxed);
 
                     if let Some(seg_lock) = unsafe { &*segment }.migration_lock.try_read() {
-                        let new_entry = unsafe { &*segment }.first_entry(self.entry_align);
+                        let new_entry = unsafe { &*segment }.first_entry(self.entry_layout.align());
                         (new_entry, seg_lock)
                     } else {
                         cur_entry = self.probe_loc.load(Ordering::Relaxed);

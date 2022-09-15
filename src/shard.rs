@@ -22,8 +22,7 @@ impl<const N: usize> ShardCache<N> {
 
     pub fn new(
         cache_size_byte: usize,
-        entry_size: usize,
-        entry_align: usize,
+        entry_layout: std::alloc::Layout,
         mem_type: MemType,
     ) -> Self {
         let cache_size = cache_size_byte / N;
@@ -34,7 +33,7 @@ impl<const N: usize> ShardCache<N> {
                 unsafe {
                     std::ptr::write(
                         elem.as_mut_ptr(),
-                        ClockCache::new(cache_size, entry_size, entry_align, mem_type),
+                        ClockCache::new(cache_size, entry_layout, mem_type),
                     )
                 }
             }
