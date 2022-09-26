@@ -82,11 +82,9 @@ fn basic() {
     for i in 0..cache_capacity {
         let prob_loc = cache.get_prob_loc_idx(2);
         assert_eq!(prob_loc, i % entry_per_seg);
-        let (entry, _evicted) = cache
+        let (_, entry): (Option<()>, *mut TestEntry) = cache
             .probe_entry_evict(
-                |_ptr| {
-                    unreachable!("should not evict");
-                },
+                |_ptr| unreachable!("should not evict"),
                 |ptr| {
                     let test_entry = TestEntry::init(i as u16);
                     let cached_ptr = ptr as *mut TestEntry;
@@ -106,7 +104,8 @@ fn basic() {
     // now the cache is full, probe entry will reset the reference bit
     let mut prob_loc = cache.get_prob_loc_idx(2);
     for _i in 0..cache_capacity / 16 {
-        let entry = cache.probe_entry_evict(|_v| unreachable!(), |_v| unreachable!());
+        let entry: Result<(Option<()>, ()), JasmineError> =
+            cache.probe_entry_evict(|_v| unreachable!(), |_v| unreachable!());
         let new_loc = cache.get_prob_loc_idx(2);
         assert_eq!(new_loc, (16 + prob_loc) % entry_per_seg);
         prob_loc = new_loc;
@@ -172,7 +171,7 @@ fn add_remove_segment() {
     let mut allocated = vec![];
 
     for i in 1..=entry_per_seg {
-        let (entry, _evicted) = cache
+        let (_evicted, entry): (Option<()>, *mut TestEntry) = cache
             .probe_entry_evict(
                 |_ptr| unreachable!(),
                 |ptr| {
@@ -189,14 +188,15 @@ fn add_remove_segment() {
 
     // move the cursor to next segment
     for _i in 0..entry_per_seg / 16 {
-        let entry = cache.probe_entry_evict(|_ptr| unreachable!(), |_ptr| unreachable!());
+        let entry: Result<(Option<()>, _), _> =
+            cache.probe_entry_evict(|_ptr| unreachable!(), |_ptr| unreachable!());
         assert!(entry.is_err());
     }
 
     unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
 
     for i in 1..=entry_per_seg {
-        let (entry, _evicted) = cache
+        let (_evicted, entry): (Option<()>, _) = cache
             .probe_entry_evict(
                 |_ptr| unreachable!(),
                 |ptr| {
@@ -229,7 +229,8 @@ fn add_remove_segment() {
     }
 
     for _i in 0..10 {
-        let entry = cache.probe_entry_evict(|_v| unreachable!(), |_v| unreachable!());
+        let entry: Result<(Option<()>, _), _> =
+            cache.probe_entry_evict(|_v| unreachable!(), |_v| unreachable!());
         assert!(entry.is_err());
     }
     std::mem::drop(cache);

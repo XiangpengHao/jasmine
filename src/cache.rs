@@ -551,14 +551,15 @@ impl ClockCache {
     /// 1. Fill callback can never fail, it will only be called once, and after called, the function returns Ok.
     /// 2. Evict callback can fail, if it fails, it returns Err and fill callback will not be called.
     pub fn probe_entry_evict<
-        Evict: FnOnce(*mut u8) -> Option<()>,
-        Fill: FnOnce(*mut u8) -> RT,
-        RT,
+        Evict: FnOnce(*mut u8) -> Option<ET>,
+        Fill: FnOnce(*mut u8) -> FT,
+        ET,
+        FT,
     >(
         &self,
         evict_callback: Evict,
         fill_callback: Fill,
-    ) -> Result<(RT, bool), JasmineError> {
+    ) -> Result<(Option<ET>, FT), JasmineError> {
         let e = self.probe_entry()?;
 
         let mut meta = e.load_meta(Ordering::Acquire);
@@ -566,14 +567,14 @@ impl ClockCache {
         // assert!(meta.locked);
 
         if meta.occupied {
-            evict_callback(e.data_ptr()).ok_or(JasmineError::EvictFailure)?;
+            let et = evict_callback(e.data_ptr()).ok_or(JasmineError::EvictFailure)?;
 
             let filled = fill_callback(e.data_ptr());
             meta.locked = false;
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            Ok((filled, true))
+            Ok((Some(et), filled))
         } else {
             // the entry was empty, no eviction needed.
             let ptr = e.data_ptr();
@@ -584,7 +585,7 @@ impl ClockCache {
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
-            Ok((filled, false))
+            Ok((None, filled))
         }
     }
 
@@ -614,6 +615,8 @@ impl ClockCache {
         }
     }
 
+    /// # Safety
+    /// Do not use this.
     pub unsafe fn pin_entry(&self, entry: *mut EntryMeta) -> Result<u8, u8> {
         let meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
         if meta.locked {
@@ -630,6 +633,8 @@ impl ClockCache {
         )
     }
 
+    /// # Safety
+    /// Do not use this.
     pub unsafe fn unpin_entry(&self, entry: *mut EntryMeta) {
         let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
         assert!(meta.locked);
