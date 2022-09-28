@@ -186,7 +186,7 @@ impl EntryMeta {
         self.meta.load(order).into()
     }
 
-    fn set_meta(&self, value: EntryMetaUnpacked, order: Ordering) {
+    pub(crate) fn set_meta(&self, value: EntryMetaUnpacked, order: Ordering) {
         self.meta.store(value.into(), order);
     }
 

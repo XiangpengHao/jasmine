@@ -79,30 +79,37 @@ impl<const N: usize> ShardCache<N> {
     /// # Safety
     /// The caller must ensure this entry will not be evicted, i.e., returns None on evict entry callback
     pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
-        let backoff = Backoff::new();
-        loop {
-            let old = unsafe { &*entry }.meta.load(Ordering::Relaxed);
-            let mut meta = EntryMetaUnpacked::from(old);
-            if meta.locked {
-                // we must wait the lock to be released.
-                backoff.snooze();
-                continue;
-            }
-            meta.locked = false;
-            meta.referenced = false;
-            meta.occupied = false;
-            match unsafe { &*entry }.meta.compare_exchange_weak(
-                old,
-                meta.into(),
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(_) => {
-                    backoff.snooze();
-                    continue;
-                }
-            }
+        let _backoff = Backoff::new();
+        let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
+        meta.locked = false;
+        meta.referenced = false;
+        meta.occupied = false;
+        unsafe {
+            (*entry).set_meta(meta, Ordering::Release);
         }
+        // loop {
+        //     let old = unsafe { &*entry }.meta.load(Ordering::Relaxed);
+        //     let mut meta = EntryMetaUnpacked::from(old);
+        //     if meta.locked {
+        //         // we must wait the lock to be released.
+        //         backoff.snooze();
+        //         continue;
+        //     }
+        //     meta.locked = false;
+        //     meta.referenced = false;
+        //     meta.occupied = false;
+        //     match unsafe { &*entry }.meta.compare_exchange_weak(
+        //         old,
+        //         meta.into(),
+        //         Ordering::Release,
+        //         Ordering::Relaxed,
+        //     ) {
+        //         Ok(_) => return,
+        //         Err(_) => {
+        //             backoff.snooze();
+        //             continue;
+        //         }
+        //     }
+        // }
     }
 }
