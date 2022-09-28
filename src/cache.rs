@@ -140,7 +140,7 @@ impl<'a> Iterator for SegmentIter<'a> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EntryMetaUnpacked {
     pub referenced: bool,
     pub locked: bool,
@@ -564,7 +564,7 @@ impl ClockCache {
 
         let mut meta = e.load_meta(Ordering::Acquire);
 
-        assert!(meta.locked);
+        assert!(meta.locked, "Entry should be locked: {:?}", meta);
 
         if meta.occupied {
             let et = evict_callback(e.data_ptr()).ok_or(JasmineError::EvictFailure)?;
