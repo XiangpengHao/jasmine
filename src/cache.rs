@@ -172,7 +172,7 @@ impl From<EntryMetaUnpacked> for u8 {
 }
 
 pub struct EntryMeta {
-    meta: AtomicU8,
+    pub(crate) meta: AtomicU8,
 }
 
 impl EntryMeta {
@@ -186,15 +186,8 @@ impl EntryMeta {
         self.meta.load(order).into()
     }
 
-    pub fn set_meta(&self, value: EntryMetaUnpacked, order: Ordering) {
+    fn set_meta(&self, value: EntryMetaUnpacked, order: Ordering) {
         self.meta.store(value.into(), order);
-    }
-
-    /// This is the shortcut of loading the meta, set it to referenced, and then store it back.
-    pub fn set_referenced(&self) {
-        let mut meta = self.load_meta(Ordering::Relaxed);
-        meta.referenced = true;
-        self.set_meta(meta, Ordering::Relaxed);
     }
 
     /// Returns the next entry within the segment.
