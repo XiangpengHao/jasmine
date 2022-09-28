@@ -82,10 +82,10 @@ fn basic() {
     for i in 0..cache_capacity {
         let prob_loc = cache.get_prob_loc_idx(2);
         assert_eq!(prob_loc, i % entry_per_seg);
-        let (_, entry): (Option<()>, *mut TestEntry) = cache
+        let entry: *mut TestEntry = cache
             .probe_entry_evict(
                 |_ptr| unreachable!("should not evict"),
-                |ptr| {
+                |_: Option<()>, ptr| {
                     let test_entry = TestEntry::init(i as u16);
                     let cached_ptr = ptr as *mut TestEntry;
                     unsafe { cached_ptr.write(test_entry) };
@@ -105,7 +105,7 @@ fn basic() {
     let mut prob_loc = cache.get_prob_loc_idx(2);
     for _i in 0..cache_capacity / 16 {
         let entry: Result<(Option<()>, ()), JasmineError> =
-            cache.probe_entry_evict(|_v| unreachable!(), |_v| unreachable!());
+            cache.probe_entry_evict(|_v| unreachable!(), |_: Option<()>, _v| unreachable!());
         let new_loc = cache.get_prob_loc_idx(2);
         assert_eq!(new_loc, (16 + prob_loc) % entry_per_seg);
         prob_loc = new_loc;
@@ -127,7 +127,7 @@ fn basic() {
                     std::ptr::copy_nonoverlapping(byte_stream.as_ptr(), p, byte_stream.len());
                     Some(())
                 },
-                |p: *mut u8| {
+                |_, p: *mut u8| {
                     let val = unsafe { &*(p as *const TestEntry) };
                     val.sanity_check();
                 },
@@ -171,10 +171,10 @@ fn add_remove_segment() {
     let mut allocated = vec![];
 
     for i in 1..=entry_per_seg {
-        let (_evicted, entry): (Option<()>, *mut TestEntry) = cache
+        let entry: *mut TestEntry = cache
             .probe_entry_evict(
                 |_ptr| unreachable!(),
-                |ptr| {
+                |_: Option<()>, ptr| {
                     let test_entry = TestEntry::init(i as u16);
                     let cached_ptr = ptr as *mut TestEntry;
                     unsafe { cached_ptr.write(test_entry) };
@@ -188,18 +188,18 @@ fn add_remove_segment() {
 
     // move the cursor to next segment
     for _i in 0..entry_per_seg / 16 {
-        let entry: Result<(Option<()>, _), _> =
-            cache.probe_entry_evict(|_ptr| unreachable!(), |_ptr| unreachable!());
+        let entry: Result<_, _> =
+            cache.probe_entry_evict(|_ptr| unreachable!(), |_: Option<()>, _ptr| unreachable!());
         assert!(entry.is_err());
     }
 
     unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
 
     for i in 1..=entry_per_seg {
-        let (_evicted, entry): (Option<()>, _) = cache
+        let entry: _ = cache
             .probe_entry_evict(
                 |_ptr| unreachable!(),
-                |ptr| {
+                |_: Option<()>, ptr| {
                     let test_entry = TestEntry::init((i + entry_per_seg) as u16);
                     let cached_ptr = ptr as *mut TestEntry;
                     unsafe { cached_ptr.write(test_entry) };
@@ -229,8 +229,8 @@ fn add_remove_segment() {
     }
 
     for _i in 0..10 {
-        let entry: Result<(Option<()>, _), _> =
-            cache.probe_entry_evict(|_v| unreachable!(), |_v| unreachable!());
+        let entry: Result<(), _> =
+            cache.probe_entry_evict(|_v| unreachable!(), |_v: Option<()>, _| unreachable!());
         assert!(entry.is_err());
     }
     std::mem::drop(cache);
@@ -248,7 +248,7 @@ fn thread_probe_entry(cache: &ClockCache, i: usize) {
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
             .unwrap();
             Some(())
-    }, |ptr| {
+    }, |_,ptr| {
         // means the entry is ready to write
         let val = TestEntry::init(i as u16);
         let ptr = ptr as *mut TestEntry;
