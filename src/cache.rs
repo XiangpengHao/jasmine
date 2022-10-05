@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use crate::{backoff::Backoff, JasmineError};
 use spin::{rwlock::RwLockWriteGuard, RwLockReadGuard};
-use std::{alloc::Layout, mem::ManuallyDrop};
+use std::{alloc::Layout, mem::ManuallyDrop, ops::Deref};
 
 /// Jasmine manages memory at the granularity of segments.
 pub const SEGMENT_SIZE: usize = 2 * 1024 * 1024; // 2MB
@@ -244,6 +244,34 @@ impl Drop for ClockCache {
     }
 }
 
+pub(crate) struct LockedEntry<'a> {
+    entry: &'a EntryMeta,
+}
+
+impl Deref for LockedEntry<'_> {
+    type Target = EntryMeta;
+
+    fn deref(&self) -> &Self::Target {
+        self.entry
+    }
+}
+
+impl Drop for LockedEntry<'_> {
+    fn drop(&mut self) {
+        let old = self.entry.load_meta(Ordering::Relaxed);
+        let mut new = old.clone();
+        new.locked = false;
+
+        let rv = self.entry.meta.compare_exchange_weak(
+            old.into(),
+            new.into(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        assert!(rv.is_ok());
+    }
+}
+
 impl ClockCache {
     pub fn new(cache_size_byte: usize, entry_layout: Layout, mem_type: douhua::MemType) -> Self {
         let seg_cnt = cache_size_byte / SEGMENT_SIZE;
@@ -474,7 +502,7 @@ impl ClockCache {
     /// There are two cases this function may return None:
     /// 1. The cache is empty (due to `remove_segment`)
     /// 2. The all the entries are referenced within the probe_len (default to 16)
-    pub(crate) fn probe_entry(&self) -> Result<&EntryMeta, JasmineError> {
+    pub(crate) fn probe_entry(&self) -> Result<LockedEntry, JasmineError> {
         let mut seg_lock = None;
         for _p in 0..self.probe_len {
             let (cur_entry, cur_lock) =
@@ -487,7 +515,11 @@ impl ClockCache {
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return Ok(unsafe { &*cur_entry }),
+                Ok(_) => {
+                    return Ok(LockedEntry {
+                        entry: unsafe { &*cur_entry },
+                    })
+                }
                 Err(v) => {
                     let mut meta = EntryMetaUnpacked::from(v);
 
@@ -516,7 +548,9 @@ impl ClockCache {
                             )
                             .is_ok()
                         {
-                            return Ok(unsafe { &*cur_entry });
+                            return Ok(LockedEntry {
+                                entry: unsafe { &*cur_entry },
+                            });
                         }
                         continue;
                     }
