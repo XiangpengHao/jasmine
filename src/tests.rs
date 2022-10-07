@@ -1,12 +1,20 @@
+use rand::{distributions::Standard, prelude::Distribution, rngs::StdRng, Rng, SeedableRng};
 #[cfg(feature = "shuttle")]
 use shuttle::{
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
 };
 
+use std::alloc::Layout;
 #[cfg(not(feature = "shuttle"))]
 use std::{
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
 };
 
@@ -16,12 +24,16 @@ use crate::*;
 
 #[derive(Default)]
 struct TestEntry {
+    lock: AtomicBool,
     val: [u16; 28],
 }
 
 impl TestEntry {
     fn init(val: u16) -> Self {
-        TestEntry { val: [val; 28] }
+        TestEntry {
+            lock: AtomicBool::new(false),
+            val: [val; 28],
+        }
     }
 
     fn sanity_check(&self) {
@@ -38,14 +50,18 @@ impl ClockCache {
         let segment = Segment::from_entry(ptr);
         let first = unsafe { &*segment }.first_entry(entry_align);
 
-        (ptr as usize - first as usize) / self.entry_size
+        (ptr as usize - first as usize) / self.entry_layout.size()
     }
 }
 
 #[cfg(not(feature = "shuttle"))]
 #[test]
 fn empty_cache() {
-    let _cache = ClockCache::new(0, std::mem::size_of::<TestEntry>(), 2);
+    let _cache = ClockCache::new(
+        0,
+        Layout::from_size_align(std::mem::size_of::<TestEntry>(), 2).unwrap(),
+        douhua::MemType::DRAM,
+    );
 }
 
 #[cfg(not(feature = "shuttle"))]
@@ -55,27 +71,31 @@ fn basic() {
     let cache_size = SEGMENT_SIZE * seg_cnt;
     let entry_size = std::mem::size_of::<TestEntry>();
 
-    let cache = ClockCache::new(cache_size, entry_size, 2);
-    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_size;
+    let cache = ClockCache::new(
+        cache_size,
+        Layout::from_size_align(entry_size, 2).unwrap(),
+        douhua::MemType::DRAM,
+    );
+    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_layout.size();
     let cache_capacity = entry_per_seg * seg_cnt;
     let mut allocated = vec![];
 
     for i in 0..cache_capacity {
         let prob_loc = cache.get_prob_loc_idx(2);
         assert_eq!(prob_loc, i % entry_per_seg);
-        let entry = cache.probe_entry().unwrap();
-        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
-        assert_empty_entry(entry);
+        let entry: *mut TestEntry = cache
+            .probe_entry_evict(
+                |_ptr| unreachable!("should not evict"),
+                |_: Option<()>, ptr| {
+                    let test_entry = TestEntry::init(i as u16);
+                    let cached_ptr = ptr as *mut TestEntry;
+                    unsafe { cached_ptr.write(test_entry) };
+                    cached_ptr
+                },
+            )
+            .unwrap();
 
-        let test_entry = TestEntry::init(i as u16);
-        let cached_ptr = entry.data_ptr() as *mut TestEntry;
-        unsafe { cached_ptr.write(test_entry) };
-        allocated.push(cached_ptr);
-
-        entry_meta.held = false;
-        entry_meta.referenced = true;
-        entry_meta.occupied = true;
-        entry.set_meta(entry_meta, Ordering::Relaxed);
+        allocated.push(entry);
     }
 
     for ptr in allocated.iter() {
@@ -85,23 +105,12 @@ fn basic() {
     // now the cache is full, probe entry will reset the reference bit
     let mut prob_loc = cache.get_prob_loc_idx(2);
     for _i in 0..cache_capacity / 16 {
-        let entry = cache.probe_entry();
+        let entry: Result<(Option<()>, ()), JasmineError> =
+            cache.probe_entry_evict(|_v| unreachable!(), |_: Option<()>, _v| unreachable!());
         let new_loc = cache.get_prob_loc_idx(2);
         assert_eq!(new_loc, (16 + prob_loc) % entry_per_seg);
         prob_loc = new_loc;
         assert!(entry.is_err());
-    }
-
-    // visit again, now every probe_entry will return a entry to evict.
-    for _i in 0..cache_capacity {
-        let entry = cache.probe_entry().unwrap();
-        let entry_meta = entry.load_meta(Ordering::Relaxed);
-        assert_eq!(entry_meta.referenced, false);
-        assert_eq!(entry_meta.held, false);
-        assert_eq!(entry_meta.occupied, true);
-
-        let cached_ptr = entry.data_ptr() as *mut TestEntry;
-        unsafe { &*cached_ptr }.sanity_check();
     }
 
     // visit again, now every probe_entry will return a entry to evict.
@@ -119,7 +128,7 @@ fn basic() {
                     std::ptr::copy_nonoverlapping(byte_stream.as_ptr(), p, byte_stream.len());
                     Some(())
                 },
-                |p: *mut u8| {
+                |_, p: *mut u8| {
                     let val = unsafe { &*(p as *const TestEntry) };
                     val.sanity_check();
                 },
@@ -135,18 +144,15 @@ fn basic() {
     std::mem::drop(cache);
 }
 
-fn assert_empty_entry(entry: &EntryMeta) {
-    let entry_meta = entry.load_meta(Ordering::Relaxed);
-    assert_eq!(entry_meta.held, true);
-    assert_eq!(entry_meta.referenced, false);
-    assert_eq!(entry_meta.occupied, false);
-}
-
 #[test]
 fn empty_add_segment() {
-    let cache = ClockCache::new(0, std::mem::size_of::<TestEntry>(), 2);
+    let cache = ClockCache::new(
+        0,
+        Layout::from_size_align(std::mem::size_of::<TestEntry>(), 2).unwrap(),
+        douhua::MemType::DRAM,
+    );
     unsafe {
-        cache.add_segment(Segment::alloc());
+        cache.add_segment(Segment::alloc(douhua::MemType::DRAM));
     }
 }
 
@@ -156,45 +162,54 @@ fn add_remove_segment() {
     let cache_size = SEGMENT_SIZE * seg_cnt;
     let entry_size = std::mem::size_of::<TestEntry>();
 
-    let cache = ClockCache::new(cache_size, entry_size, 2);
-    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_size;
+    let cache = ClockCache::new(
+        cache_size,
+        Layout::from_size_align(entry_size, 2).unwrap(),
+        douhua::MemType::DRAM,
+    );
+    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_layout.size();
 
     let mut allocated = vec![];
 
     for i in 1..=entry_per_seg {
-        let entry = cache.probe_entry().unwrap();
-        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
-        assert_empty_entry(entry);
+        let entry: *mut TestEntry = cache
+            .probe_entry_evict(
+                |_ptr| unreachable!(),
+                |_: Option<()>, ptr| {
+                    let test_entry = TestEntry::init(i as u16);
+                    let cached_ptr = ptr as *mut TestEntry;
+                    unsafe { cached_ptr.write(test_entry) };
+                    cached_ptr
+                },
+            )
+            .unwrap();
 
-        let test_entry = TestEntry::init(i as u16);
-        let cached_ptr = entry.data_ptr() as *mut TestEntry;
-        unsafe { cached_ptr.write(test_entry) };
-        allocated.push(cached_ptr);
-
-        entry_meta.set_occupied();
-        entry.set_meta(entry_meta, Ordering::Relaxed);
+        allocated.push(entry);
     }
 
     // move the cursor to next segment
     for _i in 0..entry_per_seg / 16 {
-        let entry = cache.probe_entry();
+        let entry: Result<_, _> =
+            cache.probe_entry_evict(|_ptr| unreachable!(), |_: Option<()>, _ptr| unreachable!());
         assert!(entry.is_err());
     }
 
-    unsafe { cache.add_segment(Segment::alloc()) };
+    unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
 
     for i in 1..=entry_per_seg {
-        let entry = cache.probe_entry().unwrap();
-        assert_empty_entry(entry);
-        let mut entry_meta = entry.load_meta(Ordering::Relaxed);
+        let entry: _ = cache
+            .probe_entry_evict(
+                |_ptr| unreachable!(),
+                |_: Option<()>, ptr| {
+                    let test_entry = TestEntry::init((i + entry_per_seg) as u16);
+                    let cached_ptr = ptr as *mut TestEntry;
+                    unsafe { cached_ptr.write(test_entry) };
+                    cached_ptr
+                },
+            )
+            .unwrap();
 
-        let test_entry = TestEntry::init((i + entry_per_seg) as u16);
-        let cached_ptr = entry.data_ptr() as *mut TestEntry;
-        unsafe { cached_ptr.write(test_entry) };
-        allocated.push(cached_ptr);
-
-        entry_meta.set_occupied();
-        entry.set_meta(entry_meta, Ordering::Relaxed);
+        allocated.push(entry);
     }
 
     for ptr in allocated.iter() {
@@ -215,36 +230,33 @@ fn add_remove_segment() {
     }
 
     for _i in 0..10 {
-        let entry = cache.probe_entry();
+        let entry: Result<(), _> =
+            cache.probe_entry_evict(|_v| unreachable!(), |_v: Option<()>, _| unreachable!());
         assert!(entry.is_err());
     }
     std::mem::drop(cache);
 }
 
 fn thread_probe_entry(cache: &ClockCache, i: usize) {
-    let entry = cache.probe_entry();
-    match entry {
-        Ok(e) => {
-            let mut meta = e.load_meta(Ordering::Relaxed);
-            if meta.held {
-                // means the entry is ready to write
-                let val = TestEntry::init(i as u16);
-                let ptr = e.data_ptr() as *mut TestEntry;
-                unsafe {
-                    ptr.write(val);
-                }
-                meta.held = false;
-                meta.referenced = true;
-                meta.occupied = true;
-                e.set_meta(meta, Ordering::Relaxed);
-            } else {
-                // the entry was occupied, we check its sanity
-                let ptr = e.data_ptr() as *const TestEntry;
-                unsafe { &*ptr }.sanity_check();
-            }
+    let _= cache.probe_entry_evict(|ptr| {
+        // the entry was occupied, we check its sanity
+        let val = unsafe { &*(ptr as *const TestEntry) };
+        val.lock
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .expect("The lock should be false, because we should be the only one accessing the value.");
+        val.sanity_check();
+        val.lock
+            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+            .unwrap();
+            Some(())
+    }, |_,ptr| {
+        // means the entry is ready to write
+        let val = TestEntry::init(i as u16);
+        let ptr = ptr as *mut TestEntry;
+        unsafe {
+            ptr.write(val);
         }
-        Err(_) => {}
-    }
+    }) ;
 }
 
 #[test]
@@ -254,7 +266,11 @@ fn multi_thread_add_remove_segment() {
     let entry_per_seg = 13;
     let entry_size = EFFECTIVE_SEGMENT_SIZE / 13; // increase entry size to increase the probability of contention
 
-    let cache = ClockCache::new(cache_size, entry_size, 2);
+    let cache = ClockCache::new(
+        cache_size,
+        Layout::from_size_align(entry_size, 2).unwrap(),
+        douhua::MemType::DRAM,
+    );
     let cache = Arc::new(cache);
 
     let probe_thread_cnt = 2;
@@ -272,7 +288,7 @@ fn multi_thread_add_remove_segment() {
     let cache = cache.clone();
     thread_handlers.push(thread::spawn(move || {
         let mut pin = crossbeam::epoch::pin();
-        unsafe { cache.add_segment(Segment::alloc()) };
+        unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
 
         for i in 1..=entry_per_seg {
             pin.repin();
@@ -312,7 +328,11 @@ fn multi_thread_basic() {
     let entry_size = EFFECTIVE_SEGMENT_SIZE / entry_per_seg; // increase entry size to increase the probability of contention
 
     let cache_capacity = entry_per_seg * seg_cnt;
-    let cache = ClockCache::new(cache_size, entry_size, 2);
+    let cache = ClockCache::new(
+        cache_size,
+        Layout::from_size_align(entry_size, 2).unwrap(),
+        douhua::MemType::DRAM,
+    );
     let cache = Arc::new(cache);
 
     let thread_cnt = 3;
@@ -330,6 +350,171 @@ fn multi_thread_basic() {
     for h in thread_handlers {
         h.join().unwrap();
     }
+}
+
+enum Operation {
+    Reference,
+    ProbeEvict,
+    ProbeEvictFail,
+    Evict,
+}
+
+impl Distribution<Operation> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Operation {
+        match rng.gen_range(0..4) {
+            0 => Operation::Reference,
+            1 => Operation::ProbeEvict,
+            2 => Operation::ProbeEvictFail,
+            3 => Operation::Evict,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Workload {
+    value: usize,
+}
+
+fn multi_thread_e2e() {
+    let seg_cnt = 2;
+    let cache_size = SEGMENT_SIZE * seg_cnt;
+
+    let entry_per_seg = 10;
+    let entry_size = EFFECTIVE_SEGMENT_SIZE / entry_per_seg - std::mem::size_of::<EntryMeta>(); // increase entry size to increase the probability of contention
+
+    let cache_capacity = entry_per_seg * seg_cnt;
+    let cache = ClockCache::new(
+        cache_size,
+        Layout::from_size_align(entry_size, 1).unwrap(),
+        douhua::MemType::DRAM,
+    );
+    let cache = Arc::new(cache);
+
+    let mut entry_ptr_vec = Vec::new();
+    for _i in 0..cache_capacity {
+        let rv = cache.probe_entry_evict(
+            |_ptr| -> Option<()> { unreachable!() },
+            |_, ptr| {
+                let entry_ptr =
+                    unsafe { ptr.sub(std::mem::size_of::<EntryMeta>()) as *mut EntryMeta };
+                entry_ptr_vec.push(entry_ptr as usize);
+                Workload { value: 0 };
+            },
+        );
+        rv.expect("Can't fail because the cache is initially empty");
+    }
+    let entry_ptr_vec = Arc::new(entry_ptr_vec);
+
+    let op_cnt = 64;
+    let thread_cnt = 3;
+    let mut thread_handlers = vec![];
+    for t in 1..=thread_cnt {
+        let cache = cache.clone();
+        let entry_ptr_vec = entry_ptr_vec.clone();
+        let handle = thread::spawn(move || {
+            let mut rng = StdRng::seed_from_u64(t);
+            for _ in 0..op_cnt {
+                let op = rng.gen::<Operation>();
+                match op {
+                    Operation::Reference => {
+                        let idx = rng.gen_range(0..cache_capacity);
+                        let entry_ptr = entry_ptr_vec[idx] as *mut EntryMeta;
+                        unsafe {
+                            cache.mark_referenced(entry_ptr);
+                        }
+                    }
+                    Operation::ProbeEvict => {
+                        let rv = cache.probe_entry_evict(
+                            |ptr| {
+                                let old_v = unsafe { std::ptr::read(ptr as *mut Workload) };
+                                Some(old_v)
+                            },
+                            |evicted, ptr| match evicted {
+                                Some(mut v) => {
+                                    let old_v = v.clone();
+                                    v.value += 43;
+                                    let ptr = ptr as *mut Workload;
+                                    unsafe {
+                                        ptr.write(v);
+                                    }
+                                    Some(old_v)
+                                }
+                                None => {
+                                    let ptr = ptr as *mut Workload;
+                                    unsafe {
+                                        ptr.write(Workload { value: 0 });
+                                    }
+                                    None
+                                }
+                            },
+                        );
+                        match rv {
+                            Ok(v) => match v {
+                                Some(v) => {
+                                    assert_eq!(v.value % 43, 0);
+                                }
+                                None => {}
+                            },
+                            Err(v) => {
+                                assert!(
+                                    matches!(v, JasmineError::NeedRetry)
+                                        || matches!(v, JasmineError::ProbeLimitExceeded)
+                                );
+                            }
+                        }
+                    }
+                    Operation::ProbeEvictFail => {
+                        let rv: Result<_, JasmineError> = cache.probe_entry_evict(
+                            |_ptr| -> Option<*mut u8> { None },
+                            |evicted: Option<_>, _ptr| -> () {
+                                assert!(evicted.is_none());
+                            },
+                        );
+                        match rv {
+                            Ok(_) => {}
+                            Err(e) => {
+                                assert!(
+                                    matches!(e, JasmineError::EvictFailure)
+                                        || matches!(e, JasmineError::ProbeLimitExceeded)
+                                );
+                            }
+                        }
+                    }
+                    Operation::Evict => {
+                        let idx = rng.gen_range(0..cache_capacity);
+                        let entry_ptr = entry_ptr_vec[idx] as *mut EntryMeta;
+                        unsafe {
+                            cache.mark_empty(entry_ptr);
+                        }
+                    }
+                }
+            }
+        });
+        thread_handlers.push(handle);
+    }
+
+    for h in thread_handlers {
+        h.join().unwrap();
+    }
+}
+
+#[cfg(not(feature = "shuttle"))]
+#[test]
+fn plain_multi_thread_e2e() {
+    multi_thread_e2e();
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_multi_thread_e2e() {
+    let config = shuttle::Config::default();
+    let mut runner = shuttle::PortfolioRunner::new(true, config);
+    runner.add(shuttle::scheduler::PctScheduler::new(5, 40_000));
+    runner.add(shuttle::scheduler::PctScheduler::new(5, 40_000));
+    runner.add(shuttle::scheduler::RandomScheduler::new(40_000));
+    runner.add(shuttle::scheduler::RandomScheduler::new(40_000));
+    runner.run(multi_thread_e2e);
 }
 
 #[cfg(not(feature = "shuttle"))]

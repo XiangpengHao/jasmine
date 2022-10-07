@@ -12,10 +12,10 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libc = { version = "0.2.132", optional = true }
 nanorand = "0.7.0"
 rand = "0.8.5"
 spin = "0.9.4"
+douhua = { git = "https://github.com/XiangpengHao/douhua.git", branch = "numa" }
 
 [dev-dependencies]
 shuttle = "0.2.0"
@@ -24,4 +24,4 @@ static_assertions = "1.1.0"
 
 [features]
 shuttle = []
-mmap = ["libc"]
+mock_numa = ["douhua/mock_numa"]

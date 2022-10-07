@@ -73,6 +73,7 @@ jobs:
           override: true
           components: rust-src
     - run: sudo ln -s /usr/bin/llvm-symbolizer-6.0 /usr/bin/llvm-symbolizer
-    - run: cargo test --features "shuttle" shuttle_basic --release
-    - run: cargo test --features "shuttle" shuttle_add_remove_segment --release
+    - run: cargo test --features "mock_numa,shuttle" shuttle_basic --release
+    - run: cargo test --features "mock_numa,shuttle" shuttle_add_remove_segment --release
+    - run: cargo test --features "mock_numa,shuttle" e2e --release
  

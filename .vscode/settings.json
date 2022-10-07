@@ -1,6 +1,6 @@
 {
 	"rust-analyzer.cargo.features": [
-		// "shuttle",
-		// "mmap"
+		"shuttle",
+		"mock_numa",
 	]
 }
