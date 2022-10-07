@@ -1,3 +1,4 @@
+use rand::{distributions::Standard, prelude::Distribution, rngs::StdRng, Rng, SeedableRng};
 #[cfg(feature = "shuttle")]
 use shuttle::{
     sync::{
@@ -349,6 +350,171 @@ fn multi_thread_basic() {
     for h in thread_handlers {
         h.join().unwrap();
     }
+}
+
+enum Operation {
+    Reference,
+    ProbeEvict,
+    ProbeEvictFail,
+    Evict,
+}
+
+impl Distribution<Operation> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Operation {
+        match rng.gen_range(0..4) {
+            0 => Operation::Reference,
+            1 => Operation::ProbeEvict,
+            2 => Operation::ProbeEvictFail,
+            3 => Operation::Evict,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Workload {
+    value: usize,
+}
+
+fn multi_thread_e2e() {
+    let seg_cnt = 2;
+    let cache_size = SEGMENT_SIZE * seg_cnt;
+
+    let entry_per_seg = 10;
+    let entry_size = EFFECTIVE_SEGMENT_SIZE / entry_per_seg - std::mem::size_of::<EntryMeta>(); // increase entry size to increase the probability of contention
+
+    let cache_capacity = entry_per_seg * seg_cnt;
+    let cache = ClockCache::new(
+        cache_size,
+        Layout::from_size_align(entry_size, 1).unwrap(),
+        douhua::MemType::DRAM,
+    );
+    let cache = Arc::new(cache);
+
+    let mut entry_ptr_vec = Vec::new();
+    for _i in 0..cache_capacity {
+        let rv = cache.probe_entry_evict(
+            |_ptr| -> Option<()> { unreachable!() },
+            |_, ptr| {
+                let entry_ptr =
+                    unsafe { ptr.sub(std::mem::size_of::<EntryMeta>()) as *mut EntryMeta };
+                entry_ptr_vec.push(entry_ptr as usize);
+                Workload { value: 0 };
+            },
+        );
+        rv.expect("Can't fail because the cache is initially empty");
+    }
+    let entry_ptr_vec = Arc::new(entry_ptr_vec);
+
+    let op_cnt = 64;
+    let thread_cnt = 3;
+    let mut thread_handlers = vec![];
+    for t in 1..=thread_cnt {
+        let cache = cache.clone();
+        let entry_ptr_vec = entry_ptr_vec.clone();
+        let handle = thread::spawn(move || {
+            let mut rng = StdRng::seed_from_u64(t);
+            for _ in 0..op_cnt {
+                let op = rng.gen::<Operation>();
+                match op {
+                    Operation::Reference => {
+                        let idx = rng.gen_range(0..cache_capacity);
+                        let entry_ptr = entry_ptr_vec[idx] as *mut EntryMeta;
+                        unsafe {
+                            cache.mark_referenced(entry_ptr);
+                        }
+                    }
+                    Operation::ProbeEvict => {
+                        let rv = cache.probe_entry_evict(
+                            |ptr| {
+                                let old_v = unsafe { std::ptr::read(ptr as *mut Workload) };
+                                Some(old_v)
+                            },
+                            |evicted, ptr| match evicted {
+                                Some(mut v) => {
+                                    let old_v = v.clone();
+                                    v.value += 43;
+                                    let ptr = ptr as *mut Workload;
+                                    unsafe {
+                                        ptr.write(v);
+                                    }
+                                    Some(old_v)
+                                }
+                                None => {
+                                    let ptr = ptr as *mut Workload;
+                                    unsafe {
+                                        ptr.write(Workload { value: 0 });
+                                    }
+                                    None
+                                }
+                            },
+                        );
+                        match rv {
+                            Ok(v) => match v {
+                                Some(v) => {
+                                    assert_eq!(v.value % 43, 0);
+                                }
+                                None => {}
+                            },
+                            Err(v) => {
+                                assert!(
+                                    matches!(v, JasmineError::NeedRetry)
+                                        || matches!(v, JasmineError::ProbeLimitExceeded)
+                                );
+                            }
+                        }
+                    }
+                    Operation::ProbeEvictFail => {
+                        let rv: Result<_, JasmineError> = cache.probe_entry_evict(
+                            |_ptr| -> Option<*mut u8> { None },
+                            |evicted: Option<_>, _ptr| -> () {
+                                assert!(evicted.is_none());
+                            },
+                        );
+                        match rv {
+                            Ok(_) => {}
+                            Err(e) => {
+                                assert!(
+                                    matches!(e, JasmineError::EvictFailure)
+                                        || matches!(e, JasmineError::ProbeLimitExceeded)
+                                );
+                            }
+                        }
+                    }
+                    Operation::Evict => {
+                        let idx = rng.gen_range(0..cache_capacity);
+                        let entry_ptr = entry_ptr_vec[idx] as *mut EntryMeta;
+                        unsafe {
+                            cache.mark_empty(entry_ptr);
+                        }
+                    }
+                }
+            }
+        });
+        thread_handlers.push(handle);
+    }
+
+    for h in thread_handlers {
+        h.join().unwrap();
+    }
+}
+
+#[cfg(not(feature = "shuttle"))]
+#[test]
+fn plain_multi_thread_e2e() {
+    multi_thread_e2e();
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_multi_thread_e2e() {
+    let config = shuttle::Config::default();
+    let mut runner = shuttle::PortfolioRunner::new(true, config);
+    runner.add(shuttle::scheduler::PctScheduler::new(5, 40_000));
+    runner.add(shuttle::scheduler::PctScheduler::new(5, 40_000));
+    runner.add(shuttle::scheduler::RandomScheduler::new(40_000));
+    runner.add(shuttle::scheduler::RandomScheduler::new(40_000));
+    runner.run(multi_thread_e2e);
 }
 
 #[cfg(not(feature = "shuttle"))]

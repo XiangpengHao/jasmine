@@ -259,6 +259,7 @@ impl Deref for LockedEntry<'_> {
 impl Drop for LockedEntry<'_> {
     fn drop(&mut self) {
         let old = self.entry.load_meta(Ordering::Relaxed);
+        assert!(old.locked, "entry should be locked");
         let mut new = old.clone();
         new.locked = false;
 
@@ -601,6 +602,7 @@ impl ClockCache {
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
+            std::mem::forget(e);
             Ok(filled)
         } else {
             // the entry was empty, no eviction needed.
@@ -612,6 +614,7 @@ impl ClockCache {
             meta.referenced = true;
             meta.occupied = true;
             e.set_meta(meta, Ordering::Release);
+            std::mem::forget(e);
             Ok(filled)
         }
     }
@@ -621,11 +624,18 @@ impl ClockCache {
     /// # Safety
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
     pub unsafe fn mark_referenced(&self, entry: *mut EntryMeta) {
-        let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
-        meta.referenced = true;
-        unsafe {
-            (*entry).set_meta(meta, Ordering::Release);
+        let old = unsafe { &*entry }.meta.load(Ordering::Relaxed);
+        let mut meta = EntryMetaUnpacked::from(old);
+        if meta.referenced || meta.locked {
+            return;
         }
+        meta.referenced = true;
+        let _ = unsafe { &*entry }.meta.compare_exchange_weak(
+            old,
+            meta.into(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ); // we don't care if it fails, but we need to use CAS to make sure the old value is still valid.
     }
 
     /// Mark the entry as empty.
@@ -633,12 +643,30 @@ impl ClockCache {
     /// # Safety
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
     pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
-        let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
-        meta.locked = false;
-        meta.referenced = false;
-        meta.occupied = false;
-        unsafe {
-            (*entry).set_meta(meta, Ordering::Release);
+        let backoff = Backoff::new();
+        loop {
+            let old = unsafe { &*entry }.meta.load(Ordering::Relaxed);
+            let mut meta = EntryMetaUnpacked::from(old);
+            if meta.locked {
+                // we must wait the lock to be released.
+                backoff.spin();
+                continue;
+            }
+            meta.locked = false;
+            meta.referenced = false;
+            meta.occupied = false;
+            match unsafe { &*entry }.meta.compare_exchange_weak(
+                old,
+                meta.into(),
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(_) => {
+                    backoff.snooze();
+                    continue;
+                }
+            }
         }
     }
 

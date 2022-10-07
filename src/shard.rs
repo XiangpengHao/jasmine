@@ -77,7 +77,7 @@ impl<const N: usize> ShardCache<N> {
     /// Mark the entry as empty.
     ///
     /// # Safety
-    /// The caller must ensure this entry will not be evicted, i.e., returns None on evict entry callback
+    /// The caller must ensure this entry will not be evicted, i.e., should return None on evict_entry_callback
     pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
         let _backoff = Backoff::new();
         let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
