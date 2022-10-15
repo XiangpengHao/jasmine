@@ -1,8 +1,8 @@
 use douhua::{Allocator, MemType};
-#[cfg(all(feature = "shuttle", test))]
+#[cfg(feature = "shuttle")]
 use shuttle::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
-#[cfg(not(all(feature = "shuttle", test)))]
+#[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use crate::{backoff::Backoff, JasmineError};

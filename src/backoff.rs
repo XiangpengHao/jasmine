@@ -31,7 +31,7 @@ impl Backoff {
             self.step.set(self.step.get() + 1);
         }
 
-        #[cfg(all(feature = "shuttle", test))]
+        #[cfg(feature = "shuttle")]
         shuttle::thread::yield_now();
     }
 
@@ -43,10 +43,10 @@ impl Backoff {
                 std::hint::spin_loop();
             }
         } else {
-            #[cfg(all(feature = "shuttle", test))]
+            #[cfg(feature = "shuttle")]
             shuttle::thread::yield_now();
 
-            #[cfg(not(all(feature = "shuttle", test)))]
+            #[cfg(not(feature = "shuttle"))]
             ::std::thread::yield_now();
         }
 
