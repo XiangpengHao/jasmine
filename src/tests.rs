@@ -45,12 +45,12 @@ impl TestEntry {
 }
 
 impl ClockCache {
-    fn get_prob_loc_idx(&self, entry_align: usize) -> usize {
+    fn get_prob_loc_idx(&self) -> usize {
         let ptr = self.probe_loc.load(Ordering::Relaxed);
         let segment = Segment::from_entry(ptr);
-        let first = unsafe { &*segment }.first_entry(entry_align);
+        let first = unsafe { &*segment }.first_meta();
 
-        (ptr as usize - first as usize) / self.entry_layout.size()
+        (ptr as usize - first as usize) / std::mem::size_of::<EntryMeta>()
     }
 }
 
@@ -69,19 +69,18 @@ fn empty_cache() {
 fn basic() {
     let seg_cnt = 2;
     let cache_size = SEGMENT_SIZE * seg_cnt;
-    let entry_size = std::mem::size_of::<TestEntry>();
 
     let cache = ClockCache::new(
         cache_size,
-        Layout::from_size_align(entry_size, 2).unwrap(),
+        Layout::new::<TestEntry>(),
         douhua::MemType::DRAM,
     );
-    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_layout.size();
+    let entry_per_seg = cache.entry_per_seg;
     let cache_capacity = entry_per_seg * seg_cnt;
     let mut allocated = vec![];
 
     for i in 0..cache_capacity {
-        let prob_loc = cache.get_prob_loc_idx(2);
+        let prob_loc = cache.get_prob_loc_idx();
         assert_eq!(prob_loc, i % entry_per_seg);
         let entry: *mut TestEntry = cache
             .probe_entry_evict(
@@ -103,11 +102,11 @@ fn basic() {
     }
 
     // now the cache is full, probe entry will reset the reference bit
-    let mut prob_loc = cache.get_prob_loc_idx(2);
+    let mut prob_loc = cache.get_prob_loc_idx();
     for _i in 0..cache_capacity / 16 {
         let entry: Result<(Option<()>, ()), JasmineError> =
             cache.probe_entry_evict(|_v| unreachable!(), |_: Option<()>, _v| unreachable!());
-        let new_loc = cache.get_prob_loc_idx(2);
+        let new_loc = cache.get_prob_loc_idx();
         assert_eq!(new_loc, (16 + prob_loc) % entry_per_seg);
         prob_loc = new_loc;
         assert!(entry.is_err());
@@ -167,7 +166,7 @@ fn add_remove_segment() {
         Layout::from_size_align(entry_size, 2).unwrap(),
         douhua::MemType::DRAM,
     );
-    let entry_per_seg = EFFECTIVE_SEGMENT_SIZE / cache.entry_layout.size();
+    let entry_per_seg = cache.entry_per_seg;
 
     let mut allocated = vec![];
 
@@ -383,12 +382,12 @@ fn multi_thread_e2e() {
     let entry_per_seg = 10;
     let entry_size = EFFECTIVE_SEGMENT_SIZE / entry_per_seg - std::mem::size_of::<EntryMeta>(); // increase entry size to increase the probability of contention
 
-    let cache_capacity = entry_per_seg * seg_cnt;
     let cache = ClockCache::new(
         cache_size,
         Layout::from_size_align(entry_size, 1).unwrap(),
         douhua::MemType::DRAM,
     );
+    let cache_capacity = cache.entry_per_seg * seg_cnt;
     let cache = Arc::new(cache);
 
     let mut entry_ptr_vec = Vec::new();

@@ -1,9 +1,7 @@
-use std::sync::atomic::Ordering;
-
 use douhua::MemType;
 use nanorand::Rng;
 
-use crate::{backoff::Backoff, ClockCache, EntryMeta, EntryMetaUnpacked};
+use crate::{ClockCache, EntryMeta};
 
 pub struct ShardCache<const N: usize> {
     sub_cache: [ClockCache; N],
@@ -60,18 +58,7 @@ impl<const N: usize> ShardCache<N> {
     /// # Safety
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
     pub unsafe fn mark_referenced(&self, entry: *mut EntryMeta) {
-        let old = unsafe { &*entry }.meta.load(Ordering::Relaxed);
-        let mut meta = EntryMetaUnpacked::from(old);
-        if meta.referenced || meta.locked {
-            return;
-        }
-        meta.referenced = true;
-        let _ = unsafe { &*entry }.meta.compare_exchange_weak(
-            old,
-            meta.into(),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ); // we don't care if it fails, but we need to use CAS to make sure the old value is still valid.
+        unsafe { self.sub_cache.get_unchecked(0).mark_referenced(entry) }
     }
 
     /// Mark the entry as empty.
@@ -79,37 +66,6 @@ impl<const N: usize> ShardCache<N> {
     /// # Safety
     /// The caller must ensure this entry will not be evicted, i.e., should return None on evict_entry_callback
     pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
-        let _backoff = Backoff::new();
-        let mut meta = unsafe { &*entry }.load_meta(Ordering::Relaxed);
-        meta.locked = false;
-        meta.referenced = false;
-        meta.occupied = false;
-        unsafe {
-            (*entry).set_meta(meta, Ordering::Release);
-        }
-        // loop {
-        //     let old = unsafe { &*entry }.meta.load(Ordering::Relaxed);
-        //     let mut meta = EntryMetaUnpacked::from(old);
-        //     if meta.locked {
-        //         // we must wait the lock to be released.
-        //         backoff.snooze();
-        //         continue;
-        //     }
-        //     meta.locked = false;
-        //     meta.referenced = false;
-        //     meta.occupied = false;
-        //     match unsafe { &*entry }.meta.compare_exchange_weak(
-        //         old,
-        //         meta.into(),
-        //         Ordering::Release,
-        //         Ordering::Relaxed,
-        //     ) {
-        //         Ok(_) => return,
-        //         Err(_) => {
-        //             backoff.snooze();
-        //             continue;
-        //         }
-        //     }
-        // }
+        unsafe { self.sub_cache.get_unchecked(0).mark_empty(entry) }
     }
 }
