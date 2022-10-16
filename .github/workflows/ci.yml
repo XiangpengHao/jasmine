@@ -57,10 +57,10 @@ jobs:
     - run: cargo test --features "mock_numa"
     - run: >
         env ASAN_OPTIONS="detect_odr_violation=0" RUSTFLAGS="-Z sanitizer=address" 
-        cargo test --features "mock_numa" -Zbuild-std --target x86_64-unknown-linux-gnu --tests 
+        cargo test --features "mock_numa" -Zbuild-std --target x86_64-unknown-linux-gnu 
     - run: >
         env RUSTFLAGS="-Z sanitizer=memory" 
-        cargo test --features "mock_numa" -Zbuild-std --target x86_64-unknown-linux-gnu --tests
+        cargo test --features "mock_numa" -Zbuild-std --target x86_64-unknown-linux-gnu
   
   shuttle:
     needs: tests_sans

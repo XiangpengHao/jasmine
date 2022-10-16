@@ -384,7 +384,7 @@ fn multi_thread_e2e() {
 
     let cache = ClockCache::new(
         cache_size,
-        Layout::from_size_align(entry_size, 1).unwrap(),
+        Layout::from_size_align(entry_size, 8).unwrap(),
         douhua::MemType::DRAM,
     );
     let cache_capacity = cache.entry_per_seg * seg_cnt;
