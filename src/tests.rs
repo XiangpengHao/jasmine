@@ -44,10 +44,11 @@ impl TestEntry {
     }
 }
 
+#[cfg(not(feature = "shuttle"))]
 impl ClockCache {
     fn get_prob_loc_idx(&self) -> usize {
         let ptr = self.probe_loc.load(Ordering::Relaxed);
-        let segment = Segment::from_entry(ptr);
+        let segment = Segment::from_meta(ptr);
         let first = unsafe { &*segment }.first_meta();
 
         (ptr as usize - first as usize) / std::mem::size_of::<EntryMeta>()
@@ -150,8 +151,9 @@ fn empty_add_segment() {
         Layout::from_size_align(std::mem::size_of::<TestEntry>(), 2).unwrap(),
         douhua::MemType::DRAM,
     );
+
     unsafe {
-        cache.add_segment(Segment::alloc(douhua::MemType::DRAM));
+        cache.add_segment(Segment::new_from_heap(douhua::MemType::DRAM, 0, 0));
     }
 }
 
@@ -193,7 +195,13 @@ fn add_remove_segment() {
         assert!(entry.is_err());
     }
 
-    unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
+    unsafe {
+        cache.add_segment(Segment::new_from_heap(
+            douhua::MemType::DRAM,
+            entry_size as u32,
+            cache.entry_offset_of_seg as u32,
+        ))
+    };
 
     for i in 1..=entry_per_seg {
         let entry: _ = cache
@@ -262,14 +270,14 @@ fn thread_probe_entry(cache: &ClockCache, i: usize) {
 fn multi_thread_add_remove_segment() {
     let seg_cnt = 1;
     let cache_size = SEGMENT_SIZE * seg_cnt;
-    let entry_per_seg = 13;
     let entry_size = EFFECTIVE_SEGMENT_SIZE / 13; // increase entry size to increase the probability of contention
 
     let cache = ClockCache::new(
         cache_size,
-        Layout::from_size_align(entry_size, 2).unwrap(),
+        Layout::from_size_align(entry_size, std::mem::align_of::<TestEntry>()).unwrap(),
         douhua::MemType::DRAM,
     );
+    let entry_per_seg = cache.entry_per_seg;
     let cache = Arc::new(cache);
 
     let probe_thread_cnt = 2;
@@ -287,7 +295,13 @@ fn multi_thread_add_remove_segment() {
     let cache = cache.clone();
     thread_handlers.push(thread::spawn(move || {
         let mut pin = crossbeam::epoch::pin();
-        unsafe { cache.add_segment(Segment::alloc(douhua::MemType::DRAM)) };
+        unsafe {
+            cache.add_segment(Segment::new_from_heap(
+                douhua::MemType::DRAM,
+                cache.entry_phy_size as u32,
+                cache.entry_offset_of_seg as u32,
+            ))
+        };
 
         for i in 1..=entry_per_seg {
             pin.repin();
@@ -395,9 +409,7 @@ fn multi_thread_e2e() {
         let rv = cache.probe_entry_evict(
             |_ptr| -> Option<()> { unreachable!() },
             |_, ptr| {
-                let entry_ptr =
-                    unsafe { ptr.sub(std::mem::size_of::<EntryMeta>()) as *mut EntryMeta };
-                entry_ptr_vec.push(entry_ptr as usize);
+                entry_ptr_vec.push(ptr as usize);
                 Workload { value: 0 };
             },
         );
@@ -418,7 +430,7 @@ fn multi_thread_e2e() {
                 match op {
                     Operation::Reference => {
                         let idx = rng.gen_range(0..cache_capacity);
-                        let entry_ptr = entry_ptr_vec[idx] as *mut EntryMeta;
+                        let entry_ptr = entry_ptr_vec[idx] as *const u8;
                         unsafe {
                             cache.mark_referenced(entry_ptr);
                         }
@@ -482,7 +494,7 @@ fn multi_thread_e2e() {
                     }
                     Operation::Evict => {
                         let idx = rng.gen_range(0..cache_capacity);
-                        let entry_ptr = entry_ptr_vec[idx] as *mut EntryMeta;
+                        let entry_ptr = entry_ptr_vec[idx] as *const u8;
                         unsafe {
                             cache.mark_empty(entry_ptr);
                         }

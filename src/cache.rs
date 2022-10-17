@@ -1,11 +1,14 @@
-use std::{
-    alloc::Layout,
-    mem::ManuallyDrop,
-    ops::Deref,
-    sync::{
-        atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering},
-        RwLock, RwLockReadGuard, RwLockWriteGuard,
-    },
+use std::{alloc::Layout, mem::ManuallyDrop, ops::Deref};
+
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
+
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+#[cfg(not(feature = "shuttle"))]
+use std::sync::{
+    atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering},
+    RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 
 use douhua::{Allocator, MemType};
@@ -15,11 +18,13 @@ use crate::{backoff::Backoff, utils::align_up, JasmineError, SEGMENT_ALIGN, SEGM
 pub struct Segment {
     next: AtomicPtr<Segment>,
     migration_lock: RwLock<()>,
+    entry_start_offset: u32,
+    entry_phy_size: u32,
 }
 
 #[cfg(test)]
 #[cfg(not(feature = "shuttle"))]
-static_assertions::const_assert_eq!(std::mem::size_of::<Segment>(), 24);
+static_assertions::const_assert_eq!(std::mem::size_of::<Segment>(), 32);
 
 impl Segment {
     pub(crate) fn first_meta(&self) -> *const EntryMeta {
@@ -29,19 +34,34 @@ impl Segment {
     }
 
     #[inline]
-    pub(crate) fn from_entry(ptr: *const EntryMeta) -> *const Segment {
+    pub(crate) fn from_meta(ptr: *const EntryMeta) -> *const Segment {
         let ptr = (ptr as usize) & !SEGMENT_ALIGN;
         ptr as *mut Segment
     }
 
-    pub fn alloc(mem_type: MemType) -> *mut u8 {
+    pub(crate) fn from_entry(ptr: *const u8) -> *const Segment {
+        let ptr = (ptr as usize) & !SEGMENT_ALIGN;
+        ptr as *mut Segment
+    }
+
+    pub fn new_from_heap(
+        mem_type: MemType,
+        entry_phy_size: u32,
+        entry_start_offset: u32,
+    ) -> *mut Segment {
         unsafe {
             let seg_layout =
                 std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
 
-            Allocator::get()
+            let ptr = Allocator::get()
                 .alloc_zeroed(seg_layout, mem_type)
-                .expect("OOM")
+                .expect("OOM") as *mut Segment;
+            let seg_ref = &mut *ptr;
+            seg_ref.next.store(std::ptr::null_mut(), Ordering::Relaxed);
+            seg_ref.migration_lock = RwLock::new(());
+            seg_ref.entry_phy_size = entry_phy_size;
+            seg_ref.entry_start_offset = entry_start_offset;
+            ptr
         }
     }
 
@@ -137,7 +157,7 @@ impl EntryMeta {
     /// Returns the next entry within the segment.
     /// Returns `None` if the entry is the last one.
     fn next_entry(&self, max_entry_per_seg: usize) -> Option<*const EntryMeta> {
-        let segment = Segment::from_entry(self);
+        let segment = Segment::from_meta(self);
         let cur_entry_idx = ((self as *const EntryMeta as usize - segment as usize)
             - std::mem::size_of::<Segment>())
             / std::mem::size_of::<EntryMeta>();
@@ -212,11 +232,11 @@ impl Drop for LockedEntry<'_> {
 pub struct ClockCache {
     segments: AtomicPtr<Segment>,
     probe_len: usize,
-    pub(crate) entry_layout: Layout,
     pub(crate) probe_loc: AtomicPtr<EntryMeta>,
     segment_cnt: AtomicUsize,
+    pub(crate) entry_phy_size: usize,
     pub(crate) entry_per_seg: usize,
-    entry_offset_of_seg: usize,
+    pub(crate) entry_offset_of_seg: usize,
     mem_type: MemType,
 }
 
@@ -250,21 +270,23 @@ impl ClockCache {
     /// Get entry start offset and count of a segment
     fn entry_offset_and_cnt(entry_layout: &Layout) -> (usize, usize) {
         let effective_size = SEGMENT_SIZE - std::mem::size_of::<Segment>();
-        let upper_bound = effective_size / (entry_layout.size() + std::mem::size_of::<EntryMeta>());
+        let entry_phy_size = align_up(entry_layout.size(), entry_layout.align());
+
+        let upper_bound = effective_size / (entry_phy_size + std::mem::size_of::<EntryMeta>());
         let entry_start = align_up(
             std::mem::size_of::<Segment>() + upper_bound * std::mem::size_of::<EntryMeta>(),
             entry_layout.align(),
         );
-        let effective_entry_cnt = (SEGMENT_SIZE - entry_start) / entry_layout.size();
-        (entry_start, effective_entry_cnt)
+        let effective_entry_cnt = (SEGMENT_SIZE - entry_start) / entry_phy_size;
+        (entry_start, std::cmp::min(effective_entry_cnt, upper_bound))
     }
 
     fn data_ptr(&self, entry: *const EntryMeta) -> *mut u8 {
-        let segment = Segment::from_entry(entry);
+        let segment = Segment::from_meta(entry);
         let cur_entry_idx = ((entry as *const EntryMeta as usize - segment as usize)
             - std::mem::size_of::<Segment>())
             / std::mem::size_of::<EntryMeta>();
-        let entry_offset = self.entry_offset_of_seg + cur_entry_idx * self.entry_layout.size();
+        let entry_offset = self.entry_offset_of_seg + cur_entry_idx * self.entry_phy_size;
         unsafe { (segment as *mut u8).add(entry_offset) }
     }
 
@@ -274,17 +296,14 @@ impl ClockCache {
 
     pub fn new(cache_size_byte: usize, entry_layout: Layout, mem_type: douhua::MemType) -> Self {
         let seg_cnt = cache_size_byte / SEGMENT_SIZE;
-        let entry_size = entry_layout.size() + std::mem::size_of::<EntryMeta>();
-        let entry_size = align_up(entry_size, entry_layout.align());
-        let entry_layout = Layout::from_size_align(entry_size, entry_layout.align()).unwrap();
 
+        let entry_phy_size = align_up(entry_layout.size(), entry_layout.align());
+
+        let (entry_offset, entry_cnt) = Self::entry_offset_and_cnt(&entry_layout);
         let mut first: *mut Segment = std::ptr::null_mut();
         let mut prev: *mut Segment = std::ptr::null_mut();
         for i in 0..seg_cnt {
-            let ptr = Segment::alloc(mem_type) as *mut Segment;
-            unsafe {
-                (*ptr).next = AtomicPtr::new(std::ptr::null_mut());
-            }
+            let ptr = Segment::new_from_heap(mem_type, entry_phy_size as u32, entry_offset as u32);
 
             if i == 0 {
                 first = ptr;
@@ -308,12 +327,11 @@ impl ClockCache {
             std::ptr::null_mut()
         };
 
-        let (entry_offset, entry_cnt) = Self::entry_offset_and_cnt(&entry_layout);
         ClockCache {
             segments: AtomicPtr::new(first),
             probe_loc: AtomicPtr::new(first_entry as *mut EntryMeta),
             probe_len: 16,
-            entry_layout,
+            entry_phy_size,
             mem_type,
             entry_per_seg: entry_cnt,
             entry_offset_of_seg: entry_offset,
@@ -327,13 +345,8 @@ impl ClockCache {
     /// The ptr must be valid and at least `SEGMENT_SIZE` (default 4096) bytes long.
     ///
     /// The only safe and stable way to get a ptr is to call `Segment::alloc()`.
-    pub unsafe fn add_segment(&self, ptr: *mut u8) {
+    pub unsafe fn add_segment(&self, ptr: *mut Segment) {
         let cur = self.segments.load(Ordering::Relaxed);
-
-        {
-            std::ptr::write_bytes(ptr, 0, SEGMENT_SIZE);
-        }
-        let ptr = ptr as *mut Segment;
         let new_segment = { &*ptr };
 
         if cur.is_null() {
@@ -388,7 +401,7 @@ impl ClockCache {
 
         // step 2: make sure the probe_loc is not pointing to the selected segment
         let prob_loc = self.probe_loc.load(Ordering::Acquire);
-        let prob_seg = Segment::from_entry(prob_loc);
+        let prob_seg = Segment::from_meta(prob_loc);
         if prob_seg == cur {
             if next == cur {
                 // we are the last one, no thread will probe_entry on us
@@ -443,7 +456,7 @@ impl ClockCache {
                     let seg_lock = match seg_lock {
                         Some(l) => l,
                         None => {
-                            let segment = Segment::from_entry(cur_entry);
+                            let segment = Segment::from_meta(cur_entry);
                             if let Ok(seg_lock) = unsafe { &*segment }.migration_lock.try_read() {
                                 seg_lock
                             } else {
@@ -456,7 +469,7 @@ impl ClockCache {
                     (v, seg_lock)
                 }
                 None => {
-                    let cur_segment = Segment::from_entry(cur_entry);
+                    let cur_segment = Segment::from_meta(cur_entry);
                     let segment = unsafe { &*cur_segment }.next.load(Ordering::Relaxed);
 
                     if let Ok(seg_lock) = unsafe { &*segment }.migration_lock.try_read() {
@@ -620,14 +633,22 @@ impl ClockCache {
     ///
     /// # Safety
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
-    pub unsafe fn mark_referenced(&self, entry: *mut EntryMeta) {
-        let old = unsafe { &*entry }.meta.load(Ordering::Relaxed);
+    pub unsafe fn mark_referenced(&self, entry: *const u8) {
+        let segment_ptr = Segment::from_entry(entry);
+        let segment = unsafe { &*segment_ptr };
+        let entry_offset =
+            (entry as usize - segment_ptr as usize - segment.entry_start_offset as usize)
+                / segment.entry_phy_size as usize;
+
+        let first_meta = segment.first_meta();
+        let target_meta = first_meta.add(entry_offset);
+        let old = unsafe { &*target_meta }.meta.load(Ordering::Relaxed);
         let mut meta = EntryMetaUnpacked::from(old);
         if meta.referenced || meta.locked {
             return;
         }
         meta.referenced = true;
-        let _ = unsafe { &*entry }.meta.compare_exchange_weak(
+        let _ = unsafe { &*target_meta }.meta.compare_exchange_weak(
             old,
             meta.into(),
             Ordering::Relaxed,
@@ -639,10 +660,19 @@ impl ClockCache {
     ///
     /// # Safety
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
-    pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
+    pub unsafe fn mark_empty(&self, entry: *const u8) {
+        let segment_ptr = Segment::from_entry(entry);
+        let segment = unsafe { &*segment_ptr };
+        let entry_offset =
+            (entry as usize - segment_ptr as usize - segment.entry_start_offset as usize)
+                / segment.entry_phy_size as usize;
+
+        let first_meta = segment.first_meta();
+        let target_meta = first_meta.add(entry_offset);
+
         let backoff = Backoff::new();
         loop {
-            let old = unsafe { &*entry }.meta.load(Ordering::Relaxed);
+            let old = unsafe { &*target_meta }.meta.load(Ordering::Relaxed);
             let mut meta = EntryMetaUnpacked::from(old);
             if meta.locked {
                 // we must wait the lock to be released.
@@ -652,7 +682,7 @@ impl ClockCache {
             meta.locked = false;
             meta.referenced = false;
             meta.occupied = false;
-            match unsafe { &*entry }.meta.compare_exchange_weak(
+            match unsafe { &*target_meta }.meta.compare_exchange_weak(
                 old,
                 meta.into(),
                 Ordering::Release,

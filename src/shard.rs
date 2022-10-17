@@ -1,7 +1,7 @@
 use douhua::MemType;
 use nanorand::Rng;
 
-use crate::{ClockCache, EntryMeta};
+use crate::ClockCache;
 
 pub struct ShardCache<const N: usize> {
     sub_cache: [ClockCache; N],
@@ -57,7 +57,7 @@ impl<const N: usize> ShardCache<N> {
     ///
     /// # Safety
     /// The caller must ensure the entry ptr is valid: (1) non-null, (2) pointing to the right entry with right offset.
-    pub unsafe fn mark_referenced(&self, entry: *mut EntryMeta) {
+    pub unsafe fn mark_referenced(&self, entry: *const u8) {
         unsafe { self.sub_cache.get_unchecked(0).mark_referenced(entry) }
     }
 
@@ -65,7 +65,7 @@ impl<const N: usize> ShardCache<N> {
     ///
     /// # Safety
     /// The caller must ensure this entry will not be evicted, i.e., should return None on evict_entry_callback
-    pub unsafe fn mark_empty(&self, entry: *mut EntryMeta) {
+    pub unsafe fn mark_empty(&self, entry: *const u8) {
         unsafe { self.sub_cache.get_unchecked(0).mark_empty(entry) }
     }
 }

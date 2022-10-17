@@ -74,7 +74,7 @@ jobs:
           override: true
           components: rust-src
     - run: sudo apt install libnuma-dev
-    - run: cargo test --features "mock_numa,shuttle" shuttle_basic --release
-    - run: cargo test --features "mock_numa,shuttle" shuttle_add_remove_segment --release
-    - run: cargo test --features "mock_numa,shuttle" e2e --release
+    - run: cargo test --features "mock_numa,shuttle" shuttle_basic --release -- --nocapture
+    - run: cargo test --features "mock_numa,shuttle" shuttle_add_remove_segment --release -- --nocapture
+    - run: cargo test --features "mock_numa,shuttle" e2e --release -- --nocapture
  
