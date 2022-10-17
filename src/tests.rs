@@ -20,7 +20,7 @@ use std::{
 
 const EFFECTIVE_SEGMENT_SIZE: usize = SEGMENT_SIZE - std::mem::size_of::<Segment>();
 
-use crate::*;
+use crate::{cache::EntryMeta, *};
 
 #[derive(Default)]
 struct TestEntry {
