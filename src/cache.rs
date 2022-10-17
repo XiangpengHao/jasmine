@@ -6,10 +6,7 @@ use shuttle::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[cfg(not(feature = "shuttle"))]
-use std::sync::{
-    atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering},
-    RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 
 use douhua::{Allocator, MemType};
 
