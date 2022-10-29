@@ -1,6 +1,6 @@
 use std::mem::ManuallyDrop;
 
-use douhua::{Allocator, MemType};
+use douhua::{Allocator, MemType, TieredAllocator};
 
 #[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -51,8 +51,9 @@ impl Segment {
                 std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
 
             let ptr = Allocator::get()
-                .alloc_zeroed(seg_layout, mem_type)
-                .expect("OOM") as *mut Segment;
+                .allocate_zeroed(seg_layout, mem_type)
+                .expect("OOM");
+            let ptr = ptr.as_non_null_ptr().as_ptr() as *mut Segment;
             let seg_ref = &mut *ptr;
             seg_ref.next.store(std::ptr::null_mut(), Ordering::Relaxed);
             seg_ref.migration_lock = RwLock::new(());
@@ -66,7 +67,7 @@ impl Segment {
     /// Deallocate a segment, the ptr must be allocated from Segment::alloc().
     pub unsafe fn dealloc(ptr: *mut u8, mem_type: MemType) {
         let layout = std::alloc::Layout::from_size_align(SEGMENT_SIZE, SEGMENT_SIZE).unwrap();
-        Allocator::get().dealloc(ptr, layout, mem_type);
+        Allocator::get().deallocate(std::ptr::NonNull::new_unchecked(ptr), layout, mem_type);
     }
 }
 

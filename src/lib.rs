@@ -1,3 +1,5 @@
+#![feature(slice_ptr_get)]
+
 mod backoff;
 mod cache;
 mod error;
